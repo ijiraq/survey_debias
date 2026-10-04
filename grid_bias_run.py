@@ -12,48 +12,91 @@ from astropy import units as u
 
 from ossssim import OSSSSim
 from ossssim.color import PhotSpec
-from ossssim.grid_bias import (
-    GridSurvey,
-    JWST_SAMPLE_A,
-    aimed_detection_bias,
-    as_check_arrays,
-    bounds_from_key,
-    check_plot_tag,
-    empty_check_samples,
-    epoch_geometry,
-    geometric_detection_prob,
-    geometric_prob_for_aimed,
-    icrs_to_ecliptic,
-    load_detections,
-    los_circular_elements,
-    parse_jpl_horizons_icrf,
-    record_check_sample,
-    sample_aimed_elements,
-    sample_aq,
-    setup_pointings,
-    stack_check_samples,
-    write_bias_check_plots,
-    write_detections_full,
-)
+
+try:
+    from .grid_bias import (
+        GridSurvey,
+        JWST_SAMPLE_A,
+        OrbitModelCatalog,
+        aimed_detection_bias,
+        as_check_arrays,
+        bounds_from_key,
+        check_plot_tag,
+        default_orbit_model_path,
+        empty_check_samples,
+        epoch_geometry,
+        geometric_detection_prob,
+        geometric_prob_for_aimed,
+        icrs_to_ecliptic,
+        load_detections,
+        los_circular_elements,
+        parse_jpl_horizons_icrf,
+        record_check_sample,
+        rih_bounds_from_key,
+        sample_aimed_elements,
+        sample_aimed_elements_at_i,
+        sample_aq,
+        setup_pointings,
+        stack_check_samples,
+        write_bias_check_plots,
+        write_detections_full,
+    )
+except ImportError:  # standalone checkout: grid_bias.py sits next to this file
+    from grid_bias import (  # type: ignore
+        GridSurvey,
+        JWST_SAMPLE_A,
+        OrbitModelCatalog,
+        aimed_detection_bias,
+        as_check_arrays,
+        bounds_from_key,
+        check_plot_tag,
+        default_orbit_model_path,
+        empty_check_samples,
+        epoch_geometry,
+        geometric_detection_prob,
+        geometric_prob_for_aimed,
+        icrs_to_ecliptic,
+        load_detections,
+        los_circular_elements,
+        parse_jpl_horizons_icrf,
+        record_check_sample,
+        rih_bounds_from_key,
+        sample_aimed_elements,
+        sample_aimed_elements_at_i,
+        sample_aq,
+        setup_pointings,
+        stack_check_samples,
+        write_bias_check_plots,
+        write_detections_full,
+    )
 
 TARGET_DETECTIONS = 5000
 
 
-def load_bias_cache(path: Path) -> dict:
+def load_bias_cache(path: Path, method: str = "aq_grid") -> dict:
     if not path.exists():
         return {}
     out = {}
     with path.open() as fh:
-        for row in csv.DictReader(fh):
-            key = tuple(float(row[k]) for k in ("a_bin", "q_bin", "si_bin", "h_bin"))
+        reader = csv.DictReader(fh)
+        fields = reader.fieldnames or []
+        if method == "model_ae" or "r_bin" in fields:
+            keys = ("r_bin", "i_bin", "h_bin")
+        else:
+            keys = ("a_bin", "q_bin", "si_bin", "h_bin")
+        for row in reader:
+            key = tuple(float(row[k]) for k in keys)
             out[key] = (float(row["bias"]), int(row["n_drawn"]))
     return out
 
 
-def save_bias_cache(path: Path, cache: dict) -> None:
+def save_bias_cache(path: Path, cache: dict, method: str = "aq_grid") -> None:
     with path.open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["a_bin", "q_bin", "si_bin", "h_bin", "bias", "n_drawn"])
+        if method == "model_ae":
+            w.writerow(["r_bin", "i_bin", "h_bin", "bias", "n_drawn"])
+        else:
+            w.writerow(["a_bin", "q_bin", "si_bin", "h_bin", "bias", "n_drawn"])
         for key, (bias, n_drawn) in sorted(cache.items()):
             w.writerow([*key, bias, n_drawn])
 
@@ -273,6 +316,15 @@ def compute_cell_bias(sim: GridBiasSimulator, cell_bounds: dict, seed: int, targ
                 f"P(det|FoV)={n_detected / n_aimed:.3g}  bias~{bias_so_far:.3g}",
                 flush=True,
             )
+    return _finish_bias_loop(
+        survey, n_aimed, n_fail, n_detected, target, geom_weight_sum,
+        sampled, detected, plot_dir, plot_tags,
+    )
+
+
+def _finish_bias_loop(survey, n_aimed, n_fail, n_detected, target, geom_weight_sum,
+                      sampled, detected, plot_dir, plot_tags
+                      ) -> tuple[float, int, dict, dict]:
     sampled_arr = as_check_arrays(sampled)
     detected_arr = as_check_arrays(detected)
     if plot_dir is not None and sampled_arr["ra"].size:
@@ -292,29 +344,122 @@ def compute_cell_bias(sim: GridBiasSimulator, cell_bounds: dict, seed: int, targ
     return aimed_detection_bias(n_aimed, geom_weight_sum), n_aimed, sampled_arr, detected_arr
 
 
+def compute_model_ae_bias(sim: GridBiasSimulator, cell_bounds: dict,
+                          model: OrbitModelCatalog, seed: int, target: int,
+                          plot_dir: Path | None = None, plot_tags: list | None = None
+                          ) -> tuple[float, int, dict, dict]:
+    """P(detect | r, i, H) with (a, e) ~ empirical OSSOS model p(a,e|r,i).
+
+    Model objects of every component in the (r, i) window are retained, so
+    the mixture weights are the model's own. Catalog cold/hot tags are not
+    used to filter the prior.
+    """
+    survey = sim.survey
+    rng = np.random.default_rng(seed)
+    r0, r1 = cell_bounds["r"]
+    i0, i1 = cell_bounds["i"]
+    h0, h1 = cell_bounds["Hx"]
+    candidates, dr, di = model.select_expanding(r0, r1, i0, i1)
+    fracs = candidates.component_fractions()
+    mix = ", ".join(f"{k}={v:.2f}" for k, v in sorted(fracs.items()))
+    print(
+        f"  model prior: {len(candidates)} objects in "
+        f"r={0.5 * (r0 + r1):.2f}±{dr:.2f}, i={0.5 * (i0 + i1):.2f}±{di:.2f} "
+        f"[{mix}]",
+        flush=True,
+    )
+    jpl = Path(sim.epoch_dirs[0]) / survey.observer_csv
+    obs = parse_jpl_horizons_icrf(jpl, sim.element_epoch)
+    sampled = empty_check_samples()
+    detected = empty_check_samples()
+
+    n_detected = 0
+    n_aimed = 0
+    n_fail = 0
+    geom_weight_sum = 0.0
+    max_tries = max(target * 1000, 10000)
+    while n_detected < target and (n_aimed + n_fail) < max_tries:
+        r_au = float(rng.uniform(r0, r1))
+        inc_cell = float(rng.uniform(i0, i1))
+        H = float(rng.uniform(h0, h1))
+        try:
+            a, e, _comp = candidates.sample_ae(rng, r_au=r_au)
+        except RuntimeError:
+            n_fail += 1
+            continue
+        el = sample_aimed_elements_at_i(
+            a, e, inc_cell, obs, rng, r_au, survey=survey
+        )
+        if el is None:
+            n_fail += 1
+            continue
+        inc, node, peri, M = el
+        n_aimed += 1
+        p_geom = geometric_prob_for_aimed(a, e, inc, node, peri, M, survey=survey)
+        rows = sim.epoch_rows(a, e, inc, node, peri, M, H)
+        flags = [int(r["flag"]) for r in rows]
+        ra, dec = _row_radec(rows[0])
+        record_check_sample(sampled, ra, dec, a, e, inc, node, peri, M)
+        if all(f >= 4 for f in flags):
+            n_detected += 1
+            geom_weight_sum += p_geom
+            record_check_sample(detected, ra, dec, a, e, inc, node, peri, M)
+        if n_aimed % 500 == 0:
+            bias_so_far = aimed_detection_bias(n_aimed, geom_weight_sum)
+            print(
+                f"    ... {n_aimed} aimed ({n_fail} invert/ae-fail), "
+                f"{n_detected}/{target} detections  "
+                f"P(det|FoV)={n_detected / n_aimed:.3g}  bias~{bias_so_far:.3g}",
+                flush=True,
+            )
+    return _finish_bias_loop(
+        survey, n_aimed, n_fail, n_detected, target, geom_weight_sum,
+        sampled, detected, plot_dir, plot_tags,
+    )
+
+
 def run_grid_bias(survey: GridSurvey, root: Path, target: int = TARGET_DETECTIONS,
                   seed: int = 42, check_plots_dir: Path | None = None,
                   no_check_plots: bool = False,
-                  extra_header: str | None = None) -> Path:
+                  extra_header: str | None = None,
+                  model_path: Path | None = None) -> Path:
     detections = load_detections(root / survey.detections_relpath, survey)
-    cache_path = root / "bias_grid.csv"
-    cache = load_bias_cache(cache_path)
+    cache_path = root / (
+        "bias_grid_rih.csv" if survey.bias_method == "model_ae" else "bias_grid.csv"
+    )
+    cache = load_bias_cache(cache_path, method=survey.bias_method)
+    model = None
+    if survey.bias_method == "model_ae":
+        model_path = Path(model_path or default_orbit_model_path())
+        print(f"loading orbit model prior from {model_path}", flush=True)
+        model = OrbitModelCatalog.from_path(model_path)
+        fracs = model.component_fractions()
+        mix = ", ".join(f"{k}={v:.3f}" for k, v in sorted(fracs.items()))
+        print(f"  {len(model)} model objects [{mix}]", flush=True)
     sim = GridBiasSimulator(survey, root / "characterization", seed=seed)
     cells = sorted({d["cell"] for d in detections})
     _, lat = icrs_to_ecliptic(survey.field_ra_deg, survey.field_dec_deg)
     p_geo = geometric_detection_prob(survey.mosaic_area_deg2, 7.0, lat)
-    print(f"{len(cells)} cells, target={target}/cell")
+    print(f"{len(cells)} cells, target={target}/cell, method={survey.bias_method}")
     print(
         f"expected single-epoch geometric P ~ {p_geo:.2e} "
         f"({survey.mosaic_area_deg2:.4f} deg², i=7°, β={lat:.2f}°)",
         flush=True,
     )
-    print(
-        "sampling: draw a/e/i_free/H in the cell, sample r on [q, Q], invert "
-        "(Ω, ω, M) onto the ICRS mosaic (LOS rotated to ecliptic); HT bias is "
-        "P(detect | FoV) × P_geom",
-        flush=True,
-    )
+    if survey.bias_method == "model_ae":
+        print(
+            "sampling: draw r/i/H in the cell; draw (a, e) from OSSOS model "
+            "objects in the (r, i) window (all components); invert (Ω, ω, M) "
+            "onto the ICRS mosaic at that r; HT bias is P(detect | FoV) × P_geom",
+            flush=True,
+        )
+    else:
+        print(
+            "sampling: draw a/e/i_free/H in the cell, sample r on [q, Q], invert "
+            "(Ω, ω, M) onto the ICRS mosaic (LOS rotated to ecliptic); HT bias is "
+            "P(detect | FoV) × P_geom",
+            flush=True,
+        )
     print(
         f"characterization: {survey.mosaic_width_deg:.5f}×{survey.mosaic_height_deg:.5f} deg "
         f"({survey.mosaic_area_deg2:.4f} deg²) at "
@@ -352,13 +497,19 @@ def run_grid_bias(survey: GridSurvey, root: Path, target: int = TARGET_DETECTION
         print(f"cell {idx+1}/{len(cells)} {key}:")
         members = [d["name"] for d in detections if d["cell"] == key]
         print(f"  objects: {', '.join(str(n) for n in members)}", flush=True)
-        bias, n_drawn, sampled, detected = compute_cell_bias(
-            sim, bounds_from_key(key), seed + idx, target,
-            plot_dir=plot_dir, plot_tags=members,
-        )
+        if survey.bias_method == "model_ae":
+            bias, n_drawn, sampled, detected = compute_model_ae_bias(
+                sim, rih_bounds_from_key(key), model, seed + idx, target,
+                plot_dir=plot_dir, plot_tags=members,
+            )
+        else:
+            bias, n_drawn, sampled, detected = compute_cell_bias(
+                sim, bounds_from_key(key), seed + idx, target,
+                plot_dir=plot_dir, plot_tags=members,
+            )
         cache[key] = (bias, n_drawn)
         print(f"  bias={bias:.6g} n_drawn={n_drawn}")
-        save_bias_cache(cache_path, cache)
+        save_bias_cache(cache_path, cache, method=survey.bias_method)
         run_sampled.append(sampled)
         run_detected.append(detected)
 
@@ -394,6 +545,13 @@ def build_arg_parser(survey: GridSurvey, default_root: Path) -> argparse.Argumen
         "--no-check-plots", action="store_true",
         help="Skip writing sampled-vs-detected check plots",
     )
+    if survey.bias_method == "model_ae":
+        parser.add_argument(
+            "--model", default=str(default_orbit_model_path()),
+            help="Orbit model file or directory for p(a,e|r,i). Accepts "
+                 "OSSOS Models 1.0 ModelUsed tables and legacy L7 files. "
+                 f"Default: {default_orbit_model_path()}",
+        )
     return parser
 
 
@@ -402,9 +560,11 @@ def main(survey: GridSurvey | None = None, default_root: Path | None = None,
     survey = survey or JWST_SAMPLE_A
     default_root = default_root or Path.cwd()
     args = build_arg_parser(survey, default_root).parse_args()
+    model_path = Path(args.model) if hasattr(args, "model") else None
     run_grid_bias(
         survey, Path(args.root), target=args.target, seed=args.seed,
         check_plots_dir=Path(args.check_plots_dir) if args.check_plots_dir else None,
         no_check_plots=args.no_check_plots,
         extra_header=extra_header,
+        model_path=model_path,
     )

@@ -1,0 +1,35 @@
+# File: ModelUsed.dat
+# Creation time: 2026-03-06T10:56:42.866  +0100
+#
+# Plutino population model.
+# Version OSSOS 1.0, 2026-03-04
+#
+# Seed:  123476996
+#
+# Epoch: 2456505.50000
+#
+# Colors for hot:   0.60  0.00 -0.50 -1.00  1.50  1.20  0.80 -0.10 -0.50  0.00
+#
+# p1deg:         2.000
+# p2deg:         7.500
+# ew:            0.060
+# ecent:         0.190
+# libampmin:    10.000
+# libampc:      50.000
+# libampmax:   120.000
+# libamptail:  160.000
+# libamplow:     0.140
+# libampmid:     0.760
+# capomfrac:     0.480
+#
+# Hot H-dist. parameter:           12.00  1.00  0.40  8.66
+# hmin:          6.000
+#
+# lightcurve initial phase:  0.000
+# lightcurve period [day]:  0.600
+# lightcurve amplitude:  0.000
+#
+#   a        e        i      Omega    omega      M        H       epoch        dist    comment 
+  39.4209   0.2128  14.4040 100.4468 267.9357 151.8973   7.87 2456505.50000   47.1269 03:02_259
+  39.4477   0.1094  10.3238   3.6987 211.9218  89.5212   7.91 2456505.50000   39.8809 03:02_127
+  39.3541   0.0883  10.3014  24.9343  58.7937  68.6449   7.39 2456505.50000   38.3673 03:02_160

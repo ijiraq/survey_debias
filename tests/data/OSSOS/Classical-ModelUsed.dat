@@ -1,0 +1,43 @@
+# File: ModelUsed.dat
+# Creation time: 2026-03-02T14:12:06.062  +0100
+#
+# Classical population model.
+# Version OSSOS 1.0, 2026-02-24
+#
+# Seed:  123476790
+#
+# Epoch: 2453157.50000
+#
+# Debiased main belt model files:
+#     Hot_aq_density_Bias-aq-i-H-v6.3-All_Surveys_0.20_cut.dat
+#     Cold_aq_density_Bias-aq-i-H-v6.3-All_Surveys_0.20_cut.dat
+#
+# a_step:  0.10
+# q_step:  0.10
+#
+# Hcut:   8.70
+#
+# Colors for cold:  0.90  0.00 -0.50 -1.00  1.50  1.20  0.80 -0.10 -0.50  0.00
+# Colors for hot:   0.60  0.00 -0.50 -1.00  1.50  1.20  0.80 -0.10 -0.50  0.00
+#
+# Fractions of (cold, low-a): 0.169; (cold, high-a): 0.175; hot: 0.602; kernel: 0.054
+#
+# Parameters for hot inclination distribution:   0.00 16.50
+# Parameters for cold inclination distribution:   4.90  0.70
+# Parameters for warm inclination distribution:  12.00  0.50
+#
+# Cold, low-a H-dist. parameter:    8.66  1.00  0.40  8.66
+# Cold, high-a H-dist. parameter:   8.66  1.00  0.40  8.66
+# Hot H-dist. parameter:            8.66  1.00  0.40  8.66
+# Kernel H-dist. parameter:         8.66  1.00  0.40  8.66
+#
+# Phase effect parameter G:  0.15
+#
+# lightcurve initial phase:  0.000
+# lightcurve period [day]:  0.600
+# lightcurve amplitude:  0.000
+#
+#   a        e        i      Omega    omega      M        H       epoch        dist    comment 
+  43.5036   0.0330   2.0069 244.0338  96.6008 269.1247   7.56 2453157.50000   43.5728 coldl_   
+  43.1984   0.1332   7.5339 282.0146 159.4347 156.3157   6.87 2453157.50000   48.5704   hot_   
+  44.1360   0.0428   4.2495  91.8360 288.3744 280.0530   7.70 2453157.50000   43.8856 coldl_   

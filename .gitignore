@@ -1,0 +1,7 @@
+# Full OSSOS ModelUsed tables used as the debias prior. Keep a local copy in
+# Models/OSSOS/. A short header sample for tests is versioned under
+# tests/data/OSSOS/.
+Models/OSSOS/*-ModelUsed.dat
+
+__pycache__/
+*.pyc

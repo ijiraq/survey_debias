@@ -1,0 +1,26 @@
+# File: ModelUsed.dat
+# Creation time: 2026-03-03T17:18:23.530  +0100
+#
+# Scatering population model.
+# Version OSSOS 1.0, 2026-02-02
+#
+# Seed:  123476990
+#
+# Epoch: 2453157.50000
+#
+# Colors for hot:   0.60  0.00 -0.50 -1.00  1.50  1.20  0.80 -0.10 -0.50  0.00
+#
+# Parameters for inclination distribution:   0.00 19.00
+# Parameters for a distribution:   30.00 700.00   0.90
+# Parameters for q distribution:    0.04   0.20   2.50
+#
+# Hot H-dist. parameter:            8.30  0.32  8.66
+#
+# lightcurve initial phase:  0.000
+# lightcurve period [day]:  0.600
+# lightcurve amplitude:  0.000
+#
+#   a        e        i      Omega    omega      M        H       epoch        dist    comment 
+ 635.8753   0.9237  18.9324   0.6877 248.7256 292.4365   8.27 2453157.50000  887.6498 scatterin
+ 220.9338   0.8278  16.0264 168.5394 293.3751  48.5569   7.77 2453157.50000  239.2565 scatterin
+ 355.1510   0.9053  14.6073 130.3472  83.6627 301.9487   8.52 2453157.50000  451.9091 scatterin

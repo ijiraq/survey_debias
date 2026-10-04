@@ -1,0 +1,29 @@
+# File: ModelUsed.dat
+# Creation time: 2026-03-02T14:45:58.052  +0100
+#
+# Detached population model.
+# Version OSSOS 1.0, 2026-02-27
+#
+# Seed:  123476790
+#
+# Epoch: 2453157.50000
+#
+# Colors for hot:   0.60  0.00 -0.50 -1.00  1.50  1.20  0.80 -0.10 -0.50  0.00
+#
+# Parameters for inclination distribution:   0.00 18.00
+# Parameters for q distribution:    7 34.000
+#                                  0.080 35.500
+#                                  0.580 39.000
+#                                  0.340 49.000
+# Parameters for a distribution:   -3.00  48.00 250.00
+#
+# Hot H-dist. parameter:            8.30  0.32  0.40  8.66
+#
+# lightcurve initial phase:  0.000
+# lightcurve period [day]:  0.600
+# lightcurve amplitude:  0.000
+#
+#   a        e        i      Omega    omega      M        H       epoch        dist    comment 
+  49.2675   0.2257   6.1765  81.9902  60.8638 169.7408   8.25 2453157.50000   60.2676 detached_
+  54.8140   0.2415  26.7014 102.2511 165.0906  55.0993   7.75 2453157.50000   49.8382 detached_
+  49.2383   0.2225  20.4255 157.7811 303.5726 129.5976   7.95 2453157.50000   57.3925 detached_

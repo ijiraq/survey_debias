@@ -10,8 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-HELPER = ROOT / "src" / "ossssim" / "grid_bias.py"
+ROOT = Path(__file__).resolve().parent
+HELPER = ROOT / "grid_bias.py"
 JWST_CHAR = ROOT / "tests" / "data" / "Surveys" / "JWST"
 
 spec = importlib.util.spec_from_file_location("grid_bias", HELPER)
@@ -513,7 +513,8 @@ class GridBiasHelpers(unittest.TestCase):
 
     def test_setup_pointings_from_template(self):
         src = JWST_CHAR / "pointings.template"
-        self.assertTrue(src.is_file())
+        if not src.is_file():
+            self.skipTest(f"missing {src}")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "pointings.template").write_text(src.read_text())
@@ -540,6 +541,8 @@ class GridBiasHelpers(unittest.TestCase):
 
     def test_detections_full_columns_match_header_and_cfeps(self):
         cfeps = ROOT / "examples" / "Surveys" / "CFEPS" / "CFEPS.detections"
+        if not cfeps.is_file():
+            self.skipTest(f"missing {cfeps}")
         cfeps_header = None
         for line in cfeps.read_text().splitlines():
             if line.startswith("#") and " object " in line:
@@ -570,6 +573,77 @@ class GridBiasHelpers(unittest.TestCase):
             self.assertEqual(parsed["Hx"], "8.12")
             self.assertEqual(parsed["comp"], "cold")
             self.assertEqual(parsed["bias"], "0.0000120")
+
+
+class ModelAePrior(unittest.TestCase):
+    def test_jwst_uses_model_ae_and_n26_keeps_aq_grid(self):
+        self.assertEqual(grid_bias.JWST_SAMPLE_A.bias_method, "model_ae")
+        self.assertEqual(grid_bias.N26_HELIOSTACK.bias_method, "aq_grid")
+
+    def test_rih_cell_from_measured_r_and_i(self):
+        key = grid_bias.rih_cell_key(46.20, 1.85, 8.12)
+        self.assertEqual(key, (46.0, 1.0, 8.1))
+        bounds = grid_bias.rih_bounds_from_key(key)
+        self.assertEqual(bounds["r"], (46.0, 47.0))
+        self.assertEqual(bounds["i"], (1.0, 2.0))
+
+    def test_ossos_modelused_directory_mixes_populations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            header = (
+                "# a e i Omega omega M H epoch dist comment\n"
+            )
+            (root / "Classical-ModelUsed.dat").write_text(
+                header
+                + "44.0 0.04 2.0 10 20 30 8.0 2453157.5 43.8 coldl_\n"
+                + "44.2 0.05 2.2 10 20 30 8.0 2453157.5 44.1 coldl_\n"
+            )
+            (root / "Scattering-ModelUsed.dat").write_text(
+                header
+                + "50.0 0.30 12.0 10 20 30 8.0 2453157.5 40.0 scatterin\n"
+            )
+            cat = grid_bias.OrbitModelCatalog.from_path(root)
+            self.assertEqual(len(cat), 3)
+            fracs = cat.component_fractions()
+            self.assertAlmostEqual(fracs["Classical"], 2.0 / 3.0)
+            self.assertAlmostEqual(fracs["Scattering"], 1.0 / 3.0)
+            low = cat.select(43.0, 45.0, 1.0, 3.0)
+            self.assertEqual(set(low.comp), {"Classical"})
+            a, e, comp = low.sample_ae(np.random.default_rng(0), r_au=44.0)
+            self.assertEqual(comp, "Classical")
+            self.assertLessEqual(a * (1.0 - e), 44.0 + 1e-8)
+            self.assertGreaterEqual(a * (1.0 + e), 44.0 - 1e-8)
+
+    def test_l7_file_still_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mini.txt"
+            path.write_text(
+                "# a e i node peri M H dist comp j k\n"
+                "44.0 0.04 2.0 10 20 30 8.0 43.8 c 0 0\n"
+            )
+            cat = grid_bias.OrbitModelCatalog.from_path(path)
+            self.assertEqual(len(cat), 1)
+            self.assertEqual(cat.comp[0], "c")
+            self.assertAlmostEqual(float(cat.dist[0]), 43.8)
+
+    def test_default_model_is_ossos_directory(self):
+        self.assertEqual(
+            grid_bias.default_orbit_model_path(),
+            ROOT / "Models" / "OSSOS",
+        )
+
+    def test_committed_header_sample_loads_each_component(self):
+        sample = ROOT / "tests" / "data" / "OSSOS"
+        cat = grid_bias.OrbitModelCatalog.from_path(sample)
+        counts = {
+            name: int((cat.comp == name).sum())
+            for name in (
+                "Classical", "Detached", "Inner",
+                "Plutinos", "Scattering", "Twotinos",
+            )
+        }
+        self.assertEqual(counts, {name: 3 for name in counts})
+        self.assertEqual(len(cat), 18)
 
 
 if __name__ == "__main__":
