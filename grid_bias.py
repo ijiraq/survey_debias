@@ -35,63 +35,76 @@ MODEL_AE_MAX_EXPAND = 8
 @dataclass(frozen=True)
 class GridSurvey:
     """Pencil-beam survey geometry and photometry mapping for grid debiasing.
-    
+
     Parameters
     ----------
     name : str
-        The name of the survey.
+        The name of the survey, used in log messages and output headers.
     field_ra_deg : float
-        The right ascension of the field center in degrees.
+        ICRS right ascension of the mosaic centre in degrees.
     field_dec_deg : float
-        The declination of the field center in degrees.
+        ICRS declination of the mosaic centre in degrees.
     mosaic_width_deg : float
-        The width of the mosaic in degrees.
+        Width of the rectangular mosaic in degrees.
     mosaic_height_deg : float
-        The height of the mosaic in degrees.
+        Height of the rectangular mosaic in degrees.
     epoch_jd : tuple
-        The JD of the epochs.
+        Julian date of each survey epoch (e.g. stack midpoints). A detection
+        requires flag ≥ 4 at every epoch; the first is the element epoch.
     mag_color_offset : float
-        The color offset of the survey to the OSSOS r_AB system.
+        Added to the catalog magnitude to give OSSOS r_AB
+        (r = mag + mag_color_offset).
     mag_column : str
-        The column name of the magnitude in the survey catalog.
+        Name of the magnitude column in the detections CSV.
     observer_csv : str
-        The path to the observer CSV file.
+        File name of the observer-position CSV (JPL Horizons vectors) inside
+        each characterization directory.
     eff_file : str
-        The path to the effective area file.
+        File name of the detection-efficiency file inside each
+        characterization directory.
     fill_factor : float
-        The fill factor of the survey.
+        Fraction of the mosaic area covered by detectors; written into
+        ``pointings.list``.
     paper_reference_jd : float | None
-        The JD of the paper reference.
+        Optional reference JD from the survey paper (e.g. its orbit-fit
+        epoch). Used for logging and as the JD column in the detections-full
+        output; it is not an observing epoch.
     rate_cut_min_arcsec_hr : float
-        The minimum rate cut in arcseconds per hour.
+        Minimum sky-motion rate (arcsec/hr) used by the start-up sanity
+        check. The simulator's own rate cut comes from the characterization
+        files.
     rate_cut_max_arcsec_hr : float
-        The maximum rate cut in arcseconds per hour.
+        Maximum sky-motion rate (arcsec/hr) used by the start-up sanity
+        check.
     epoch_layout : str
-        The layout of the epochs.
+        ``"subdir"``: one characterization directory per epoch
+        (``epoch1/``, ``epoch2/``, …). ``"flat"``: a single characterization
+        directory (one epoch).
     detections_relpath : str
-        The relative path to the detections CSV file.
+        Path of the input detections CSV, relative to the survey root.
     detections_full_name : str
-        The name of the detections CSV file.
+        File name of the output detections-full file written to the survey
+        root.
     check_detected_title : str
-        The title of the detected flag.
+        Label for detected objects in the check-plot titles.
     bias_method : str
-        The method of bias correction.
+        ``"aq_grid"``: cells in (a, q, sin i_free, H) for well-determined
+        orbits. ``"model_ae"``: cells in (r, i, H) with (a, e) drawn from an
+        orbit model p(a, e | r, i).
 
     Attributes
     ----------
     n_epochs : int
-        The number of epochs.
+        Number of epochs at which a detection is required.
     mosaic_area_deg2 : float
-        The area of the mosaic in square degrees.
+        Area of the mosaic in square degrees.
     mosaic_side_deg : float
-        The side length of the equal-area square mosaic in degrees.
-    mag_to_r : function
-        The function to map the survey magnitude onto the OSSOS r_AB system.
+        Side of the equal-area square mosaic in degrees.
 
     Methods
     -------
     mag_to_r(mag: float) -> float
-        Map the survey magnitude onto the OSSOS r_AB system.
+        Map a catalog magnitude onto the OSSOS r_AB system.
     """
 
     name: str
@@ -108,7 +121,6 @@ class GridSurvey:
     paper_reference_jd: float | None = None
     rate_cut_min_arcsec_hr: float = 0.03
     rate_cut_max_arcsec_hr: float = 8.66
-    # if survey requires multiple detection at each epoch, use "subdir"
     epoch_layout: str = "subdir"  # "subdir" → epoch{i}/; "flat" → char root
     detections_relpath: str = "data/detections.csv"
     detections_full_name: str = "detections-full"
@@ -116,7 +128,6 @@ class GridSurvey:
     # "aq_grid": small (a, q, sin i_free, H) cells (well-known orbits).
     # "model_ae": (r, i, H) cells; (a, e) from an OSSOS model p(a,e|r,i).
     bias_method: str = "aq_grid"
-
 
     @property
     def n_epochs(self) -> int:
