@@ -1,4 +1,7 @@
-"""Grid-cell Horvitz–Thompson runner shared by JWST Sample A and N26."""
+"""Grid-cell Horvitz–Thompson runner for any :class:`GridSurvey`.
+
+Surveys are defined by the calling project; see ``examples/``.
+"""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +19,6 @@ from ossssim.color import PhotSpec
 try:
     from .grid_bias import (
         GridSurvey,
-        JWST_SAMPLE_A,
         OrbitModelCatalog,
         aimed_detection_bias,
         as_check_arrays,
@@ -44,7 +46,6 @@ try:
 except ImportError:  # standalone checkout: grid_bias.py sits next to this file
     from grid_bias import (  # type: ignore
         GridSurvey,
-        JWST_SAMPLE_A,
         OrbitModelCatalog,
         aimed_detection_bias,
         as_check_arrays,
@@ -108,8 +109,8 @@ class GridBiasSimulator:
     resetting ran3. Creating one OSSSSim per epoch is unnecessary and
     used to hide that only the first GetSurvey call succeeded.
 
-    JWST Sample A is 3-epoch AND (flag≥4 at every visit-stack). N26 is a
-    single 15-day heliostack, so ``n_epochs=1``.
+    A detection requires flag≥4 at every epoch in ``survey.epoch_jd``
+    (a single-epoch survey such as a heliostack has ``n_epochs=1``).
     """
 
     def __init__(self, survey: GridSurvey, char_root: Path, seed: int = 42):
@@ -151,13 +152,6 @@ class GridBiasSimulator:
 
     def detected(self, a, e, inc, node, peri, M, H) -> bool:
         return all(f >= 4 for f in self.epoch_flags(a, e, inc, node, peri, M, H))
-
-
-class JWSTSimulator(GridBiasSimulator):
-    """JWST Sample A 3-epoch AND. ``char_root`` is the first positional arg."""
-
-    def __init__(self, char_root: Path, seed: int = 42, survey: GridSurvey = JWST_SAMPLE_A):
-        super().__init__(survey, char_root, seed)
 
 
 def _jd_utc(jd: float) -> str:
@@ -555,9 +549,9 @@ def build_arg_parser(survey: GridSurvey, default_root: Path) -> argparse.Argumen
     return parser
 
 
-def main(survey: GridSurvey | None = None, default_root: Path | None = None,
+def main(survey: GridSurvey, default_root: Path | None = None,
          extra_header: str | None = None) -> None:
-    survey = survey or JWST_SAMPLE_A
+    """Command-line entry for a survey defined by the calling project."""
     default_root = default_root or Path.cwd()
     args = build_arg_parser(survey, default_root).parse_args()
     model_path = Path(args.model) if hasattr(args, "model") else None

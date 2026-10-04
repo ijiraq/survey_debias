@@ -43,17 +43,20 @@ the orbit model used as the prior.
 
 ## Surveys
 
-A survey is a `GridSurvey` in `grid_bias.py`: field centre, mosaic size,
+A survey is a `GridSurvey` (from `grid_bias.py`): field centre, mosaic size,
 epoch Julian dates, magnitude column and its offset to OSSOS \(r\), observer
 position file, efficiency file, rate cuts, epoch directory layout, and
 `bias_method`.
 
-Defined now:
+This library defines no surveys. Each survey is defined in the project that
+holds its characterization files and passed to the runner as `survey=`.
+`examples/` has one script per survey to seed those projects:
 
-- `JWST_SAMPLE_A`: JWST GO 1568 (Eduardo et al. 2026); `model_ae`; detection
-  requires flag ≥ 4 at all three epochs.
-- `N26_HELIOSTACK`: HST GO-9433 reanalysis (Napier et al. 2026); `aq_grid`;
-  single 15-day heliostack.
+- `examples/jwst_sample_a.py`: JWST GO 1568 Sample A (Eduardo et al. 2026);
+  `model_ae`; detection requires flag ≥ 4 at all three epochs. Seed for
+  `jwst-tno-followup`.
+- `examples/hst_n26.py`: HST GO-9433 reanalysis (Napier et al. 2026);
+  `aq_grid`; single 15-day heliostack. Seed for `hst-tno-followup`.
 
 ## Survey directory layout
 
@@ -100,22 +103,34 @@ for unit tests only; it is not a usable prior.
 
 ## Running
 
-There is no installed command yet. Write a small wrapper for each survey:
+There is no installed command yet. Each survey project keeps a small script
+that defines its `GridSurvey` and calls `main`. Copy one of the examples as a
+starting point:
 
 ```python
-# run_jwst.py
+# run_debias.py (in the survey project)
 from pathlib import Path
 
-from grid_bias import JWST_SAMPLE_A
+from grid_bias import GridSurvey
 from grid_bias_run import main
 
+MY_SURVEY = GridSurvey(
+    name="My survey",
+    field_ra_deg=..., field_dec_deg=...,
+    mosaic_width_deg=..., mosaic_height_deg=...,
+    epoch_jd=(...,),
+    mag_color_offset=..., mag_column="...",
+    observer_csv="...", eff_file="...",
+    bias_method="aq_grid",  # or "model_ae"
+)
+
 if __name__ == "__main__":
-    main(survey=JWST_SAMPLE_A, default_root=Path("/path/to/jwst_survey"))
+    main(survey=MY_SURVEY, default_root=Path.cwd())
 ```
 
 Then run it with this repository on `PYTHONPATH`:
 
-    PYTHONPATH=/path/to/survey_debias python run_jwst.py --root /path/to/jwst_survey
+    PYTHONPATH=/path/to/survey_debias python run_debias.py --root /path/to/survey
 
 Options:
 
@@ -149,9 +164,12 @@ extrapolation to unsampled parts of (r, i, H) or (a, q, i, H).
 
 ## Adding a survey
 
-1. Define a new `GridSurvey` in `grid_bias.py` and choose `bias_method`.
-2. Prepare the survey directory described above.
-3. Call `main(survey=YOUR_SURVEY)` from a wrapper.
+1. In the survey's own project, copy an example from `examples/`.
+2. Edit the `GridSurvey` values and choose `bias_method`.
+3. Prepare the survey directory described above and run the script.
+
+Library helpers that depend on survey geometry take `survey=` (or explicit
+field values) and raise `ValueError` if neither is given.
 
 ## Tests
 

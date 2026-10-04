@@ -1,9 +1,7 @@
-"""Grid-cell Horvitz–Thompson helpers shared by JWST Sample A and N26.
+"""Grid-cell Horvitz–Thompson helpers for pencil-beam TNO surveys.
 
-Module-level field defaults are JWST Sample A.  N26 (and any later survey)
-must pass ``survey=`` or explicit field geometry.  JWST survey files and
-wrappers live in the separate ``jwst-tno-followup`` project, not in this
-tree.
+This library defines no surveys. Each characterization project builds its
+own :class:`GridSurvey` and passes it as ``survey=`` (see ``examples/``).
 """
 from __future__ import annotations
 
@@ -18,7 +16,7 @@ A_STEP = 0.2
 Q_STEP = 0.2
 SI_STEP = 0.001
 H_STEP = 0.1
-# JWST model-ae cells: well-measured discovery distance and ecliptic i.
+# model_ae cells: well-measured discovery distance and ecliptic i.
 R_STEP = 1.0
 I_STEP = 1.0
 BOWELL_G = -0.12
@@ -27,8 +25,6 @@ OBLIQUITY_J2000_DEG = 23.4392911
 F95_OBLIQUITY_ARCSEC = 84381.41
 POINTINGS_TEMPLATE_NAME = "pointings.template"
 TWO_HOURS_DAY = 2.0 / 24.0
-# Napier et al. 2026 / user: r_AB = STMAG_F606W - 0.3
-STMAG_F606W_TO_R_AB = -0.3
 # Minimum model objects retained in an (r, i) window before the window grows.
 MODEL_AE_MIN_CANDIDATES = 50
 MODEL_AE_MAX_EXPAND = 8
@@ -70,7 +66,7 @@ class GridSurvey:
 
     @property
     def mosaic_side_deg(self) -> float:
-        """Side of the equal-area square; JWST mosaic is actually square."""
+        """Side of the equal-area square mosaic."""
         return math.sqrt(self.mosaic_area_deg2)
 
     def mag_to_r(self, mag: float) -> float:
@@ -78,76 +74,12 @@ class GridSurvey:
         return mag + self.mag_color_offset
 
 
-# Eduardo et al. 2026 ICRS mosaic centre (13:57:33, −10:51:55).
-# CADC proposal-1568 detector centroids average ~3″ east of this.
-JWST_SAMPLE_A = GridSurvey(
-    name="JWST Sample A",
-    field_ra_deg=209.3875,
-    field_dec_deg=-10.865278,
-    mosaic_width_deg=math.sqrt(0.05),
-    mosaic_height_deg=math.sqrt(0.05),
-    epoch_jd=(2459969.32118, 2459973.96785, 2459979.90854),
-    mag_color_offset=1.0,  # m_r = m_F150W2 + 1
-    mag_column="m_f150w2",
-    observer_csv="JWST.csv",
-    eff_file="JWST_sampleA.eff",
-    paper_reference_jd=2459974.5,
-    rate_cut_min_arcsec_hr=0.03,
-    rate_cut_max_arcsec_hr=8.66,
-    epoch_layout="subdir",
-    detections_relpath="data/jwst_sampleA.csv",
-    detections_full_name="JWST-free-cla_m.detections-full",
-    check_detected_title="detected flag≥4 at all 3 epochs",
-    # Short arcs: do not trust catalog (a, e); use OSSOS model p(a,e|r,i).
-    bias_method="model_ae",
-)
-
-# Napier et al. 2026 (PSJ 7, 117) reanalysis of Bernstein et al. 2004
-# GO-9433 ACS WFC F606W. 6-tile 400″×600″ mosaic, ~0.02 deg².
-# Single 15-day heliostack at the full-span midpoint, not 3-epoch AND.
-N26_HELIOSTACK = GridSurvey(
-    name="N26 heliostack",
-    field_ra_deg=15.0 * (14.0 + 7.0 / 60.0 + 53.33 / 3600.0),
-    field_dec_deg=-(11.0 + 21.0 / 60.0 + 38.0 / 3600.0),
-    mosaic_width_deg=400.0 / 3600.0,
-    mosaic_height_deg=600.0 / 3600.0,
-    epoch_jd=(2452672.8585,),
-    mag_color_offset=STMAG_F606W_TO_R_AB,  # r_AB = STMAG_F606W - 0.3
-    mag_column="m_stmag",
-    observer_csv="HST.csv",
-    eff_file="N26.eff",
-    paper_reference_jd=2452672.8585,
-    rate_cut_min_arcsec_hr=0.05,
-    rate_cut_max_arcsec_hr=6.4,
-    epoch_layout="flat",
-    detections_relpath="data/n26_detections.csv",
-    detections_full_name="N26-free-cla_m.detections-full",
-    check_detected_title="detected flag≥4 (single 15-day stack)",
-    bias_method="aq_grid",
-)
-
-# JWST Sample A aliases (module-level defaults; jwst-tno-followup re-exports).
-H_COLOR_OFFSET = JWST_SAMPLE_A.mag_color_offset
-MOSAIC_AREA_DEG2 = JWST_SAMPLE_A.mosaic_area_deg2
-MOSAIC_SIDE_DEG = JWST_SAMPLE_A.mosaic_side_deg
-MOSAIC_WIDTH_DEG = JWST_SAMPLE_A.mosaic_width_deg
-MOSAIC_HEIGHT_DEG = JWST_SAMPLE_A.mosaic_height_deg
-FILL_FACTOR = JWST_SAMPLE_A.fill_factor
-FIELD_RA_DEG = JWST_SAMPLE_A.field_ra_deg
-FIELD_DEC_DEG = JWST_SAMPLE_A.field_dec_deg
-PAPER_REFERENCE_JD = JWST_SAMPLE_A.paper_reference_jd
-EPOCH_JD = JWST_SAMPLE_A.epoch_jd
-RATE_CUT_MIN_ARCSEC_HR = JWST_SAMPLE_A.rate_cut_min_arcsec_hr
-RATE_CUT_MAX_ARCSEC_HR = JWST_SAMPLE_A.rate_cut_max_arcsec_hr
-
-
-def stmag_f606w_to_r_ab(stmag: float) -> float:
-    """AB r from ACS F606W STMAG. Napier ST plus the −0.3 zeropoint."""
-    return float(stmag) + STMAG_F606W_TO_R_AB
-
-
-def _survey_or_default(survey: GridSurvey | None) -> GridSurvey:
-    return JWST_SAMPLE_A if survey is None else survey
+def _require_survey(survey: GridSurvey | None, what: str) -> GridSurvey:
+    if survey is None:
+        raise ValueError(
+            f"{what}: pass survey= (a GridSurvey) or the explicit field values"
+        )
+    return survey
 
 
 def laplace_inclination(a_au: float) -> float:
@@ -224,12 +156,13 @@ def apparent_to_Hr(m_survey: float, d_au: float, robs_au: float = 1.0,
                    survey: GridSurvey | None = None) -> float:
     """H_r inverted from AppMag with r = Δ = d_bary.
 
-    ``color_offset`` maps the survey magnitude onto r_AB (JWST: +1 for
-    F150W2; N26: −0.3 for STMAG F606W). Geometry uses the same Bowell
-    G=-0.12 law as OSSSSim rather than a constant +0.35 mag phase offset.
+    ``color_offset`` maps the survey magnitude onto r_AB (for example +1 for
+    JWST F150W2 or −0.3 for HST STMAG F606W); it defaults to
+    ``survey.mag_color_offset``. Geometry uses the same Bowell G=-0.12 law
+    as OSSSSim rather than a constant +0.35 mag phase offset.
     """
     if color_offset is None:
-        color_offset = _survey_or_default(survey).mag_color_offset
+        color_offset = _require_survey(survey, "apparent_to_Hr").mag_color_offset
     m_r = m_survey + color_offset
     denom = 2.0 * d_au * d_au
     cos_a = max(-1.0, min(1.0, (-robs_au ** 2 + 2.0 * d_au ** 2) / denom))
@@ -240,9 +173,8 @@ def apparent_to_Hr(m_survey: float, d_au: float, robs_au: float = 1.0,
 def geometric_detection_prob(area_deg2: float, inc_deg: float, beta_deg: float) -> float:
     """Single-epoch geometric probability for a small field.
 
-    P ≈ A / (360° × 2 × sqrt(i² − β²)) when i > |β|. For the JWST mosaic
-    (A=0.05 deg²) and a ~7° inclination belt this is ~1e-5. Eduardo et al.
-    2026 Figure 20 is the cold-belt H_r luminosity function, not this rate.
+    P ≈ A / (360° × 2 × sqrt(i² − β²)) when i > |β|. For a 0.05 deg² mosaic
+    near the ecliptic and a ~7° inclination belt this is ~1e-5.
     """
     if abs(inc_deg) <= abs(beta_deg):
         return 0.0
@@ -260,7 +192,7 @@ def geometric_prob_for_aimed(a: float, e: float, inc_deg: float, node_deg: float
     cells where aimed i sits between |β_obj| and |β_field|.
     """
     if area_deg2 is None:
-        area_deg2 = _survey_or_default(survey).mosaic_area_deg2
+        area_deg2 = _require_survey(survey, "geometric_prob_for_aimed").mosaic_area_deg2
     x, y, z = ecliptic_xyz_from_elements(a, e, inc_deg, node_deg, peri_deg, M_deg)
     r = math.sqrt(x * x + y * y + z * z)
     if r <= 0.0:
@@ -289,14 +221,14 @@ def aimed_at_field(ra_deg: float | None = None, dec_deg: float | None = None,
                    ) -> tuple[float, float, float, float]:
     """(i, Ω, ω, M) that places a circular orbit on the given ICRS pointing.
 
-    This is the barycentric sky direction, not the apparent direction from JWST.
-    Use los_circular_elements to plant in the mosaic as Detos1 sees it.
+    This is the barycentric sky direction, not the apparent direction from
+    the observatory. Use los_circular_elements to plant in the mosaic as
+    Detos1 sees it.
     """
-    surv = _survey_or_default(survey)
-    if ra_deg is None:
-        ra_deg = surv.field_ra_deg
-    if dec_deg is None:
-        dec_deg = surv.field_dec_deg
+    if ra_deg is None or dec_deg is None:
+        surv = _require_survey(survey, "aimed_at_field")
+        ra_deg = surv.field_ra_deg if ra_deg is None else ra_deg
+        dec_deg = surv.field_dec_deg if dec_deg is None else dec_deg
     lon, lat = icrs_to_ecliptic(ra_deg, dec_deg)
     inc = max(abs(lat), 0.05)
     arglat = 90.0 if lat >= 0.0 else 270.0
@@ -433,9 +365,9 @@ def angle_in_rate_cone(obj_deg: float, centre_deg: float, hwidth_deg: float
                        ) -> bool:
     """Whether a motion PA is inside the rate_cut direction cone.
 
-    Detos1 uses atan2 ∈ [−180°, 180°]. A centre of 209.4° (the JWST field
-    RA, not a PA) compared without wrapping rejects pre-turnaround motion
-    at −168.7° even when half-width is 180°.
+    Detos1 uses atan2 ∈ [−180°, 180°]. A centre set to a field RA (e.g.
+    209.4°, not a PA) compared without wrapping rejects pre-turnaround
+    motion at −168.7° even when half-width is 180°.
     """
     dang = (centre_deg - obj_deg + 180.0) % 360.0 - 180.0
     return abs(dang) <= hwidth_deg
@@ -457,11 +389,10 @@ def epoch_geometry(a: float, e: float, inc_deg: float, node_deg: float,
     Detos1 advances M from the element epoch to the pointing JD, then
     measures rate over the next two hours (GetSurvey's second ObsPos).
     """
-    surv = _survey_or_default(survey)
-    if field_ra is None:
-        field_ra = surv.field_ra_deg
-    if field_dec is None:
-        field_dec = surv.field_dec_deg
+    if field_ra is None or field_dec is None:
+        surv = _require_survey(survey, "epoch_geometry")
+        field_ra = surv.field_ra_deg if field_ra is None else field_ra
+        field_dec = surv.field_dec_deg if field_dec is None else field_dec
     n = mean_motion_deg_per_day(a)
     m1 = M_deg + n * (obs_jd - element_jd)
     m2 = M_deg + n * (obs_jd + TWO_HOURS_DAY - element_jd)
@@ -888,7 +819,7 @@ def sample_aq(rng: np.random.Generator, a_bounds: tuple, q_bounds: tuple,
 def render_pointings_text(template: str, epoch: int, jd: float,
                           survey: GridSurvey | None = None) -> str:
     """Fill pointings.template for one epoch. GetSurvey reads pointings.list."""
-    surv = _survey_or_default(survey)
+    surv = _require_survey(survey, "render_pointings_text")
     text = template.format(
         epoch=epoch,
         jd=jd,
@@ -914,10 +845,11 @@ def setup_pointings(char_root, template_path=None,
     committed source as a template and regenerate the list at run time so
     pulling this branch does not require resetting those files.
 
-    ``epoch_layout='subdir'`` (JWST) writes ``epoch{i}/pointings.list``.
-    ``epoch_layout='flat'`` (N26) writes ``pointings.list`` in ``char_root``.
+    ``epoch_layout='subdir'`` (one directory per epoch) writes
+    ``epoch{i}/pointings.list``. ``epoch_layout='flat'`` (single epoch)
+    writes ``pointings.list`` in ``char_root``.
     """
-    surv = _survey_or_default(survey)
+    surv = _require_survey(survey, "setup_pointings")
     char_root = Path(char_root)
     template_path = Path(template_path) if template_path else (
         char_root / POINTINGS_TEMPLATE_NAME
@@ -955,7 +887,7 @@ def barycentric_on_icrs_los(obs_icrf, ra_deg: float, dec_deg: float, r_au: float
                             ) -> np.ndarray | None:
     """Far |R|=r intersection of the ICRS LOS, returned in J2000 ecliptic.
 
-    Observatory vectors from JWST.csv are converted to ICRF; the FoV (RA, Dec)
+    Observatory vectors from the observer CSV are converted to ICRF; the FoV (RA, Dec)
     is ICRS. Orbit elements are ecliptic, so the intersection is rotated with
     icrf_to_ecliptic (the same trick as los_circular_elements).
     """
@@ -1164,15 +1096,15 @@ def sample_mosaic_icrs(rng: np.random.Generator,
                        survey: GridSurvey | None = None
                        ) -> tuple[float, float]:
     """Uniform ICRS (RA, Dec) inside the rectangular mosaic pointing."""
-    surv = _survey_or_default(survey)
-    if ra_deg is None:
-        ra_deg = surv.field_ra_deg
-    if dec_deg is None:
-        dec_deg = surv.field_dec_deg
-    if width_deg is None:
-        width_deg = side_deg if side_deg is not None else surv.mosaic_width_deg
-    if height_deg is None:
-        height_deg = side_deg if side_deg is not None else surv.mosaic_height_deg
+    if side_deg is not None:
+        width_deg = side_deg if width_deg is None else width_deg
+        height_deg = side_deg if height_deg is None else height_deg
+    if None in (ra_deg, dec_deg, width_deg, height_deg):
+        surv = _require_survey(survey, "sample_mosaic_icrs")
+        ra_deg = surv.field_ra_deg if ra_deg is None else ra_deg
+        dec_deg = surv.field_dec_deg if dec_deg is None else dec_deg
+        width_deg = surv.mosaic_width_deg if width_deg is None else width_deg
+        height_deg = surv.mosaic_height_deg if height_deg is None else height_deg
     return (
         float(ra_deg + rng.uniform(-0.5 * width_deg, 0.5 * width_deg)),
         float(dec_deg + rng.uniform(-0.5 * height_deg, 0.5 * height_deg)),
@@ -1256,7 +1188,7 @@ def sample_aimed_elements_at_i(a: float, e: float, inc_deg: float, obs_icrf,
 def aimed_detection_bias(n_aimed: int, geom_weight_sum: float) -> float:
     """Horvitz–Thompson P(detect | cell) from FoV-aimed draws.
 
-    n_detected / n_aimed is P(Sample A | FoV). Each aimed orbit carries
+    n_detected / n_aimed is P(detected | FoV). Each aimed orbit carries
     geometric_detection_prob(A, i, β) so the product is P(detect | cell),
     the same quantity isotropic (Ω, ω, M) sampling estimates ~1e5× slower.
     geom_weight_sum is Σ 1_detected P_geom over aimed draws.
@@ -1300,7 +1232,7 @@ def stack_check_samples(parts: list) -> dict:
 
 
 def check_plot_tag(label) -> str:
-    """Filename stem for check plots: Sample A object name, or cell key."""
+    """Filename stem for check plots: detection name, or cell key."""
     if isinstance(label, tuple):
         return "cell_" + "_".join(f"{float(v):.4g}" for v in label).replace(".", "p")
     text = str(label).strip() or "object"
@@ -1329,15 +1261,16 @@ def write_bias_check_plots(out_dir, sampled: dict, detected: dict, tag: str,
     from matplotlib.patches import Rectangle
     from pathlib import Path
 
-    surv = _survey_or_default(survey)
-    if field_ra is None:
-        field_ra = surv.field_ra_deg
-    if field_dec is None:
-        field_dec = surv.field_dec_deg
-    if width_deg is None:
-        width_deg = side_deg if side_deg is not None else surv.mosaic_width_deg
-    if height_deg is None:
-        height_deg = side_deg if side_deg is not None else surv.mosaic_height_deg
+    if side_deg is not None:
+        width_deg = side_deg if width_deg is None else width_deg
+        height_deg = side_deg if height_deg is None else height_deg
+    if None in (field_ra, field_dec, width_deg, height_deg):
+        surv = _require_survey(survey, "write_bias_check_plots")
+        field_ra = surv.field_ra_deg if field_ra is None else field_ra
+        field_dec = surv.field_dec_deg if field_dec is None else field_dec
+        width_deg = surv.mosaic_width_deg if width_deg is None else width_deg
+        height_deg = surv.mosaic_height_deg if height_deg is None else height_deg
+    detected_title = survey.check_detected_title if survey else "detected flag≥4"
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     sampled = as_check_arrays(sampled)
@@ -1376,7 +1309,7 @@ def write_bias_check_plots(out_dir, sampled: dict, detected: dict, tag: str,
         ax.grid(True, alpha=0.25)
     _overlay_hist(hist_ra, sampled["ra"], detected["ra"], "RA [deg, ICRS]", n_s, n_d)
     _overlay_hist(hist_dec, sampled["dec"], detected["dec"], "Dec [deg, ICRS]", n_s, n_d)
-    fig.suptitle(f"{tag}: epoch-1 RA/Dec  ({surv.check_detected_title})",
+    fig.suptitle(f"{tag}: epoch-1 RA/Dec  ({detected_title})",
                  fontsize=11)
     fig.tight_layout()
     radec_path = out_dir / f"check_{tag}_radec.png"

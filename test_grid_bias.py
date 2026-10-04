@@ -1,4 +1,4 @@
-"""Unit tests for JWST Sample A grid-bias helpers. No Fortran required."""
+"""Unit tests for grid-bias helpers. No Fortran required."""
 from __future__ import annotations
 
 import importlib.util
@@ -18,6 +18,25 @@ spec = importlib.util.spec_from_file_location("grid_bias", HELPER)
 grid_bias = importlib.util.module_from_spec(spec)
 sys.modules["grid_bias"] = grid_bias
 spec.loader.exec_module(grid_bias)
+
+# Test fixture with JWST Sample A geometry; the library itself defines no
+# surveys (see examples/jwst_sample_a.py).
+SURVEY = grid_bias.GridSurvey(
+    name="JWST Sample A",
+    field_ra_deg=209.3875,
+    field_dec_deg=-10.865278,
+    mosaic_width_deg=math.sqrt(0.05),
+    mosaic_height_deg=math.sqrt(0.05),
+    epoch_jd=(2459969.32118, 2459973.96785, 2459979.90854),
+    mag_color_offset=1.0,
+    mag_column="m_f150w2",
+    observer_csv="JWST.csv",
+    eff_file="JWST_sampleA.eff",
+    paper_reference_jd=2459974.5,
+    epoch_layout="subdir",
+    detections_full_name="JWST-free-cla_m.detections-full",
+    bias_method="model_ae",
+)
 
 
 class GridBiasHelpers(unittest.TestCase):
@@ -47,8 +66,8 @@ class GridBiasHelpers(unittest.TestCase):
     def test_hr_inverts_appmag_without_constant_offset(self):
         m_f150w2 = 26.0
         d = 44.0
-        h = grid_bias.apparent_to_Hr(m_f150w2, d)
-        m_r = m_f150w2 + grid_bias.H_COLOR_OFFSET
+        h = grid_bias.apparent_to_Hr(m_f150w2, d, survey=SURVEY)
+        m_r = m_f150w2 + SURVEY.mag_color_offset
         opposition_approx = m_r - 10.0 * math.log10(d)
         # Bowell Φ < 1 at the implied phase, so H is brighter than 10log10(d).
         self.assertLess(h, opposition_approx)
@@ -79,10 +98,10 @@ class GridBiasHelpers(unittest.TestCase):
         self.assertLess(high, q0)
 
     def test_mosaic_fill_is_not_implant_ratio(self):
-        self.assertAlmostEqual(grid_bias.MOSAIC_SIDE_DEG ** 2, 0.05, places=12)
-        self.assertEqual(grid_bias.FILL_FACTOR, 1.0)
+        self.assertAlmostEqual(SURVEY.mosaic_side_deg ** 2, 0.05, places=12)
+        self.assertEqual(SURVEY.fill_factor, 1.0)
         implant_ff = 0.05 / (1.6 * 1.6)
-        self.assertGreater(grid_bias.FILL_FACTOR / implant_ff, 50)
+        self.assertGreater(SURVEY.fill_factor / implant_ff, 50)
 
     def test_cell_key_stable(self):
         key = grid_bias.cell_key(44.25, 42.55, 0.0452, 11.37)
@@ -95,31 +114,31 @@ class GridBiasHelpers(unittest.TestCase):
 
     def test_figure20_is_not_the_1e5_detection_rate(self):
         lon, lat = grid_bias.icrs_to_ecliptic(
-            grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         self.assertAlmostEqual(lon, 211.15, places=1)
         self.assertAlmostEqual(lat, 1.07, places=2)
         p7 = grid_bias.geometric_detection_prob(
-            grid_bias.MOSAIC_AREA_DEG2, 7.0, lat
+            SURVEY.mosaic_area_deg2, 7.0, lat
         )
         # ~1 per 10^5 draws is the on-sky geometry of 0.05 deg², not Fig. 20.
         self.assertGreater(p7, 5e-6)
         self.assertLess(p7, 2e-5)
         p_cold = grid_bias.geometric_detection_prob(
-            grid_bias.MOSAIC_AREA_DEG2, 2.5, lat
+            SURVEY.mosaic_area_deg2, 2.5, lat
         )
         self.assertGreater(p_cold, p7)
         self.assertEqual(
             grid_bias.geometric_detection_prob(
-                grid_bias.MOSAIC_AREA_DEG2, 0.5, lat
+                SURVEY.mosaic_area_deg2, 0.5, lat
             ),
             0.0,
         )
 
     def test_aimed_at_field_reaches_jwst_latitude(self):
-        inc, node, peri, M = grid_bias.aimed_at_field()
+        inc, node, peri, M = grid_bias.aimed_at_field(survey=SURVEY)
         lon, lat = grid_bias.icrs_to_ecliptic(
-            grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         self.assertAlmostEqual(inc, abs(lat), places=5)
         arglat = peri + M
@@ -141,7 +160,7 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        obs = grid_bias.parse_jpl_horizons_icrf(path, grid_bias.EPOCH_JD[0])
+        obs = grid_bias.parse_jpl_horizons_icrf(path, SURVEY.epoch_jd[0])
         self.assertAlmostEqual(math.sqrt(sum(c * c for c in obs)), 1.0, places=2)
         self.assertGreater(obs[2], 0.3)
 
@@ -150,8 +169,8 @@ class GridBiasHelpers(unittest.TestCase):
         if not path.is_file():
             self.skipTest(f"missing {path}")
         a, e, inc, node, peri, M = grid_bias.los_circular_elements(
-            grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG, 44.0, path,
-            grid_bias.EPOCH_JD[0],
+            SURVEY.field_ra_deg, SURVEY.field_dec_deg, 44.0, path,
+            SURVEY.epoch_jd[0],
         )
         self.assertEqual(e, 0.0)
         self.assertAlmostEqual(a, 44.0, places=5)
@@ -163,7 +182,7 @@ class GridBiasHelpers(unittest.TestCase):
         y = a * math.sin(math.radians(lon)) * math.cos(math.radians(lat))
         z = a * math.sin(math.radians(lat))
         obj_icrf = grid_bias.ecliptic_to_icrf(x, y, z)
-        obs = grid_bias.parse_jpl_horizons_icrf(path, grid_bias.EPOCH_JD[0])
+        obs = grid_bias.parse_jpl_horizons_icrf(path, SURVEY.epoch_jd[0])
         los = (
             obj_icrf[0] - obs[0],
             obj_icrf[1] - obs[1],
@@ -171,8 +190,8 @@ class GridBiasHelpers(unittest.TestCase):
         )
         nrm = math.sqrt(sum(c * c for c in los))
         los = tuple(c / nrm for c in los)
-        ra = math.radians(grid_bias.FIELD_RA_DEG)
-        dec = math.radians(grid_bias.FIELD_DEC_DEG)
+        ra = math.radians(SURVEY.field_ra_deg)
+        dec = math.radians(SURVEY.field_dec_deg)
         want = (
             math.cos(dec) * math.cos(ra),
             math.cos(dec) * math.sin(ra),
@@ -186,14 +205,14 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        jd = grid_bias.EPOCH_JD[0]
+        jd = SURVEY.epoch_jd[0]
         a, e, inc, node, peri, M = grid_bias.los_circular_elements(
-            grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG, 44.0, path, jd
+            SURVEY.field_ra_deg, SURVEY.field_dec_deg, 44.0, path, jd
         )
         obs = grid_bias.parse_jpl_horizons_icrf(path, jd)
         ra, dec = grid_bias.apparent_radec_deg(a, e, inc, node, peri, M, obs)
         sep = grid_bias.sky_separation_deg(
-            ra, dec, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            ra, dec, SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         self.assertLess(sep * 60.0, 0.1)
         # Mixed frames (object ICRS, observatory left ecliptic) miss by ~26',
@@ -203,10 +222,10 @@ class GridBiasHelpers(unittest.TestCase):
             a, e, inc, node, peri, M, obs_ecl
         )
         sep_m = grid_bias.sky_separation_deg(
-            ra_m, dec_m, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            ra_m, dec_m, SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         self.assertGreater(sep_m, 0.2)
-        self.assertGreater(sep_m, grid_bias.MOSAIC_SIDE_DEG / 2.0)
+        self.assertGreater(sep_m, SURVEY.mosaic_side_deg / 2.0)
 
     def test_rate_cut_209_was_field_ra_not_motion_pa(self):
         # Debug log: epoch1 object PA −168.7°, .eff centre 209.4°, hwidth 180°.
@@ -221,34 +240,34 @@ class GridBiasHelpers(unittest.TestCase):
     def test_paper_reference_jd_is_not_an_observation(self):
         # Eduardo et al. 2026 §V: JD 2459974.5 is the orbit-fit origin,
         # "near the midpoint of the observation period", not epoch 2.
-        self.assertEqual(grid_bias.PAPER_REFERENCE_JD, 2459974.5)
-        self.assertNotIn(grid_bias.PAPER_REFERENCE_JD, grid_bias.EPOCH_JD)
+        self.assertEqual(SURVEY.paper_reference_jd, 2459974.5)
+        self.assertNotIn(SURVEY.paper_reference_jd, SURVEY.epoch_jd)
         # CADC visit midpoints: ~4.6 d then ~5.9 d, not 1 d and not 5+4 at 00:00.
-        d12 = grid_bias.EPOCH_JD[1] - grid_bias.EPOCH_JD[0]
-        d23 = grid_bias.EPOCH_JD[2] - grid_bias.EPOCH_JD[1]
+        d12 = SURVEY.epoch_jd[1] - SURVEY.epoch_jd[0]
+        d23 = SURVEY.epoch_jd[2] - SURVEY.epoch_jd[1]
         self.assertGreater(d12, 4.0)
         self.assertLess(d12, 5.5)
         self.assertGreater(d23, 5.0)
         self.assertLess(d23, 7.0)
-        self.assertAlmostEqual(grid_bias.EPOCH_JD[0], 2459969.32118, places=4)
-        self.assertAlmostEqual(grid_bias.EPOCH_JD[2], 2459979.90854, places=4)
+        self.assertAlmostEqual(SURVEY.epoch_jd[0], 2459969.32118, places=4)
+        self.assertAlmostEqual(SURVEY.epoch_jd[2], 2459979.90854, places=4)
 
     def test_keplerian_plant_stays_in_mosaic_at_cadc_epochs(self):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        element_jd = grid_bias.EPOCH_JD[0]
+        element_jd = SURVEY.epoch_jd[0]
         a, e, inc, node, peri, M = grid_bias.los_circular_elements(
-            grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG, 44.0, path, element_jd
+            SURVEY.field_ra_deg, SURVEY.field_dec_deg, 44.0, path, element_jd
         )
-        half = grid_bias.MOSAIC_SIDE_DEG / 2.0
-        for jd in grid_bias.EPOCH_JD:
+        half = SURVEY.mosaic_side_deg / 2.0
+        for jd in SURVEY.epoch_jd:
             ra, dec, sep, rate = grid_bias.epoch_geometry(
-                a, e, inc, node, peri, M, path, element_jd, jd
+                a, e, inc, node, peri, M, path, element_jd, jd, survey=SURVEY
             )
             self.assertLess(sep, half, msg=f"JD {jd} sep={sep * 60:.2f}'")
-            self.assertGreaterEqual(rate, grid_bias.RATE_CUT_MIN_ARCSEC_HR)
-            self.assertLessEqual(rate, grid_bias.RATE_CUT_MAX_ARCSEC_HR)
+            self.assertGreaterEqual(rate, SURVEY.rate_cut_min_arcsec_hr)
+            self.assertLessEqual(rate, SURVEY.rate_cut_max_arcsec_hr)
 
     def test_true_anomaly_inverts_orbit_equation(self):
         a, e, f = 44.0, 0.08, math.radians(35.0)
@@ -264,10 +283,10 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        obs = grid_bias.parse_jpl_horizons_icrf(path, grid_bias.EPOCH_JD[0])
+        obs = grid_bias.parse_jpl_horizons_icrf(path, SURVEY.epoch_jd[0])
         a, e, inc, r = 44.0, 0.05, 3.0, 43.5
         got = grid_bias.keplerian_at_radec_r(
-            a, e, inc, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG,
+            a, e, inc, SURVEY.field_ra_deg, SURVEY.field_dec_deg,
             r, obs, f_sign=1.0, node_index=0,
         )
         self.assertIsNotNone(got)
@@ -275,7 +294,7 @@ class GridBiasHelpers(unittest.TestCase):
         self.assertEqual((a2, e2, inc2), (a, e, inc))
         ra, dec = grid_bias.apparent_radec_deg(a, e, inc, node, peri, M, obs)
         sep = grid_bias.sky_separation_deg(
-            ra, dec, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            ra, dec, SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         self.assertLess(sep * 60.0, 0.1)
         xyz = grid_bias.ecliptic_xyz_from_elements(a, e, inc, node, peri, M)
@@ -285,20 +304,20 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        jd = grid_bias.EPOCH_JD[0]
+        jd = SURVEY.epoch_jd[0]
         a, e, inc, node0, peri0, M0 = grid_bias.los_circular_elements(
-            grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG, 44.0, path, jd
+            SURVEY.field_ra_deg, SURVEY.field_dec_deg, 44.0, path, jd
         )
         obs = grid_bias.parse_jpl_horizons_icrf(path, jd)
         got = grid_bias.keplerian_at_radec_r(
-            a, e, inc, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG,
+            a, e, inc, SURVEY.field_ra_deg, SURVEY.field_dec_deg,
             a, obs, f_sign=1.0, node_index=0,
         )
         self.assertIsNotNone(got)
         _a, _e, _i, node, peri, M = got
         ra, dec = grid_bias.apparent_radec_deg(a, e, inc, node, peri, M, obs)
         sep = grid_bias.sky_separation_deg(
-            ra, dec, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            ra, dec, SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         self.assertLess(sep * 60.0, 0.1)
         dang = abs((node - node0 + 180.0) % 360.0 - 180.0)
@@ -308,9 +327,9 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        obs = grid_bias.parse_jpl_horizons_icrf(path, grid_bias.EPOCH_JD[0])
+        obs = grid_bias.parse_jpl_horizons_icrf(path, SURVEY.epoch_jd[0])
         got = grid_bias.keplerian_at_radec_r(
-            44.0, 0.02, 0.2, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG,
+            44.0, 0.02, 0.2, SURVEY.field_ra_deg, SURVEY.field_dec_deg,
             44.0, obs,
         )
         self.assertIsNone(got)
@@ -319,18 +338,18 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        jd = grid_bias.EPOCH_JD[0]
+        jd = SURVEY.epoch_jd[0]
         obs = grid_bias.parse_jpl_horizons_icrf(path, jd)
         a, e, ifree, r = 44.0, 0.05, 3.0, 43.5
         el = grid_bias.aimed_elements(
-            a, e, ifree, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG,
+            a, e, ifree, SURVEY.field_ra_deg, SURVEY.field_dec_deg,
             r, obs, f_sign=1.0, pole_index=0,
         )
         self.assertIsNotNone(el)
         inc, node, peri, M = el
         ra, dec = grid_bias.apparent_radec_deg(a, e, inc, node, peri, M, obs)
         sep = grid_bias.sky_separation_deg(
-            ra, dec, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            ra, dec, SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         self.assertLess(sep * 60.0, 0.1)
         xyz = grid_bias.ecliptic_xyz_from_elements(a, e, inc, node, peri, M)
@@ -344,14 +363,14 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        obs = grid_bias.parse_jpl_horizons_icrf(path, grid_bias.EPOCH_JD[0])
+        obs = grid_bias.parse_jpl_horizons_icrf(path, SURVEY.epoch_jd[0])
         r_au = 44.0
         pos_ecl = grid_bias.barycentric_on_icrs_los(
-            obs, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG, r_au
+            obs, SURVEY.field_ra_deg, SURVEY.field_dec_deg, r_au
         )
         self.assertIsNotNone(pos_ecl)
         los = grid_bias.icrs_los_unit(
-            grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         b = 2.0 * float(np.dot(obs, los))
         c = float(np.dot(obs, obs)) - r_au * r_au
@@ -365,14 +384,14 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        obs = grid_bias.parse_jpl_horizons_icrf(path, grid_bias.EPOCH_JD[0])
+        obs = grid_bias.parse_jpl_horizons_icrf(path, SURVEY.epoch_jd[0])
         a, e, ifree, r = 44.0, 0.07, 4.0, 44.5
         plus = grid_bias.aimed_elements(
-            a, e, ifree, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG,
+            a, e, ifree, SURVEY.field_ra_deg, SURVEY.field_dec_deg,
             r, obs, f_sign=1.0, pole_index=0,
         )
         minus = grid_bias.aimed_elements(
-            a, e, ifree, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG,
+            a, e, ifree, SURVEY.field_ra_deg, SURVEY.field_dec_deg,
             r, obs, f_sign=-1.0, pole_index=0,
         )
         self.assertIsNotNone(plus)
@@ -389,20 +408,20 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        obs = grid_bias.parse_jpl_horizons_icrf(path, grid_bias.EPOCH_JD[0])
+        obs = grid_bias.parse_jpl_horizons_icrf(path, SURVEY.epoch_jd[0])
         rng = np.random.default_rng(7)
-        half = grid_bias.MOSAIC_SIDE_DEG / 2.0
+        half = SURVEY.mosaic_side_deg / 2.0
         hits = 0
         for _ in range(25):
-            el = grid_bias.sample_aimed_elements(43.5, 0.04, 2.5, obs, rng)
+            el = grid_bias.sample_aimed_elements(43.5, 0.04, 2.5, obs, rng, survey=SURVEY)
             self.assertIsNotNone(el)
             inc, node, peri, M = el
             ra, dec = grid_bias.apparent_radec_deg(
                 43.5, 0.04, inc, node, peri, M, obs
             )
             # Pointings.list is a RA/Dec square, not the inscribed circle.
-            self.assertLessEqual(abs(ra - grid_bias.FIELD_RA_DEG), half + 1e-3)
-            self.assertLessEqual(abs(dec - grid_bias.FIELD_DEC_DEG), half + 1e-3)
+            self.assertLessEqual(abs(ra - SURVEY.field_ra_deg), half + 1e-3)
+            self.assertLessEqual(abs(dec - SURVEY.field_dec_deg), half + 1e-3)
             hits += 1
         self.assertEqual(hits, 25)
 
@@ -410,9 +429,9 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        obs = grid_bias.parse_jpl_horizons_icrf(path, grid_bias.EPOCH_JD[0])
+        obs = grid_bias.parse_jpl_horizons_icrf(path, SURVEY.epoch_jd[0])
         el = grid_bias.aimed_elements(
-            44.0, 0.02, 0.05, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG,
+            44.0, 0.02, 0.05, SURVEY.field_ra_deg, SURVEY.field_dec_deg,
             44.0, obs,
         )
         self.assertIsNone(el)
@@ -429,21 +448,21 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        obs = grid_bias.parse_jpl_horizons_icrf(path, grid_bias.EPOCH_JD[0])
+        obs = grid_bias.parse_jpl_horizons_icrf(path, SURVEY.epoch_jd[0])
         rng = np.random.default_rng(3)
         _, beta_field = grid_bias.icrs_to_ecliptic(
-            grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         n_pos = 0
         n_field_zero = 0
         for _ in range(40):
-            el = grid_bias.sample_aimed_elements(44.0, 0.03, 1.0, obs, rng)
+            el = grid_bias.sample_aimed_elements(44.0, 0.03, 1.0, obs, rng, survey=SURVEY)
             self.assertIsNotNone(el)
-            pg = grid_bias.geometric_prob_for_aimed(44.0, 0.03, *el)
+            pg = grid_bias.geometric_prob_for_aimed(44.0, 0.03, *el, survey=SURVEY)
             self.assertGreater(pg, 0.0)
             n_pos += 1
             if grid_bias.geometric_detection_prob(
-                    grid_bias.MOSAIC_AREA_DEG2, el[0], beta_field) == 0.0:
+                    SURVEY.mosaic_area_deg2, el[0], beta_field) == 0.0:
                 n_field_zero += 1
         self.assertEqual(n_pos, 40)
         self.assertGreater(n_field_zero, 0)
@@ -452,39 +471,39 @@ class GridBiasHelpers(unittest.TestCase):
         path = JWST_CHAR / "epoch1" / "JWST.csv"
         if not path.is_file():
             self.skipTest(f"missing {path}")
-        jd = grid_bias.EPOCH_JD[0]
+        jd = SURVEY.epoch_jd[0]
         a, e, inc0, node0, peri0, M0 = grid_bias.los_circular_elements(
-            grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG, 44.0, path, jd
+            SURVEY.field_ra_deg, SURVEY.field_dec_deg, 44.0, path, jd
         )
         ifree = grid_bias.compute_ifree(inc0, node0, a)
         obs = grid_bias.parse_jpl_horizons_icrf(path, jd)
         el = grid_bias.aimed_elements(
-            a, e, ifree, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG,
+            a, e, ifree, SURVEY.field_ra_deg, SURVEY.field_dec_deg,
             a, obs, f_sign=1.0, pole_index=0,
         )
         self.assertIsNotNone(el)
         ra, dec = grid_bias.apparent_radec_deg(a, e, *el, obs)
         sep = grid_bias.sky_separation_deg(
-            ra, dec, grid_bias.FIELD_RA_DEG, grid_bias.FIELD_DEC_DEG
+            ra, dec, SURVEY.field_ra_deg, SURVEY.field_dec_deg
         )
         self.assertLess(sep * 60.0, 0.1)
 
     def test_write_bias_check_plots(self):
         rng = np.random.default_rng(11)
-        half = grid_bias.MOSAIC_SIDE_DEG / 2.0
+        half = SURVEY.mosaic_side_deg / 2.0
         n_s, n_d = 80, 30
         sampled = grid_bias.empty_check_samples()
         detected = grid_bias.empty_check_samples()
         for i in range(n_s):
-            ra = grid_bias.FIELD_RA_DEG + rng.uniform(-half, half)
-            dec = grid_bias.FIELD_DEC_DEG + rng.uniform(-half, half)
+            ra = SURVEY.field_ra_deg + rng.uniform(-half, half)
+            dec = SURVEY.field_dec_deg + rng.uniform(-half, half)
             rec = (ra, dec, 43.8 + 0.01 * i, 0.04, 2.5, 10.0 * i, 20.0 * i, 5.0 * i)
             grid_bias.record_check_sample(sampled, *rec)
             if i < n_d:
                 grid_bias.record_check_sample(detected, *rec)
         with tempfile.TemporaryDirectory() as tmp:
             paths = grid_bias.write_bias_check_plots(
-                tmp, sampled, detected, "unit"
+                tmp, sampled, detected, "unit", survey=SURVEY
             )
             self.assertEqual(len(paths), 2)
             names = {p.name for p in paths}
@@ -520,23 +539,23 @@ class GridBiasHelpers(unittest.TestCase):
             (root / "pointings.template").write_text(src.read_text())
             for i in (1, 2, 3):
                 (root / f"epoch{i}").mkdir()
-            paths = grid_bias.setup_pointings(root)
+            paths = grid_bias.setup_pointings(root, survey=SURVEY)
             self.assertEqual(len(paths), 3)
-            for i, jd in enumerate(grid_bias.EPOCH_JD, start=1):
+            for i, jd in enumerate(SURVEY.epoch_jd, start=1):
                 text = (root / f"epoch{i}" / "pointings.list").read_text()
                 self.assertIn(f"epoch {i}", text)
                 data = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
                 self.assertEqual(len(data), 1)
                 parts = data[0].split()
                 self.assertAlmostEqual(float(parts[0]) ** 2, 0.05, places=4)
-                self.assertAlmostEqual(float(parts[2]), grid_bias.FIELD_RA_DEG, places=4)
-                self.assertAlmostEqual(float(parts[3]), grid_bias.FIELD_DEC_DEG, places=5)
+                self.assertAlmostEqual(float(parts[2]), SURVEY.field_ra_deg, places=4)
+                self.assertAlmostEqual(float(parts[3]), SURVEY.field_dec_deg, places=5)
                 self.assertAlmostEqual(float(parts[4]), jd, places=4)
                 self.assertEqual(parts[6], "JWST.csv")
                 self.assertEqual(parts[7], "JWST_sampleA.eff")
             # Second call is a no-op when the content already matches.
             again = (root / "epoch1" / "pointings.list").read_text()
-            grid_bias.setup_pointings(root)
+            grid_bias.setup_pointings(root, survey=SURVEY)
             self.assertEqual((root / "epoch1" / "pointings.list").read_text(), again)
 
     def test_detections_full_columns_match_header_and_cfeps(self):
@@ -559,7 +578,7 @@ class GridBiasHelpers(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "out.detections-full"
-            grid_bias.write_detections_full(path, [row], grid_bias.JWST_SAMPLE_A)
+            grid_bias.write_detections_full(path, [row], SURVEY)
             data = [ln for ln in path.read_text().splitlines()
                     if ln and not ln.startswith("#")]
             self.assertEqual(data[0].split(), names)
@@ -576,9 +595,26 @@ class GridBiasHelpers(unittest.TestCase):
 
 
 class ModelAePrior(unittest.TestCase):
-    def test_jwst_uses_model_ae_and_n26_keeps_aq_grid(self):
-        self.assertEqual(grid_bias.JWST_SAMPLE_A.bias_method, "model_ae")
-        self.assertEqual(grid_bias.N26_HELIOSTACK.bias_method, "aq_grid")
+    def test_library_defines_no_surveys(self):
+        for name in ("JWST_SAMPLE_A", "N26_HELIOSTACK", "FIELD_RA_DEG", "EPOCH_JD"):
+            self.assertFalse(hasattr(grid_bias, name), name)
+        self.assertEqual(grid_bias.GridSurvey.bias_method, "aq_grid")
+
+    def test_survey_dependent_helpers_require_survey(self):
+        rng = np.random.default_rng(0)
+        with self.assertRaises(ValueError):
+            grid_bias.sample_mosaic_icrs(rng)
+        with self.assertRaises(ValueError):
+            grid_bias.apparent_to_Hr(26.0, 44.0)
+        ra, dec = grid_bias.sample_mosaic_icrs(
+            rng, ra_deg=10.0, dec_deg=0.0, side_deg=0.1
+        )
+        self.assertLessEqual(abs(ra - 10.0), 0.05)
+        self.assertLessEqual(abs(dec), 0.05)
+        self.assertAlmostEqual(
+            grid_bias.apparent_to_Hr(26.0, 44.0, color_offset=1.0),
+            grid_bias.apparent_to_Hr(26.0, 44.0, survey=SURVEY),
+        )
 
     def test_rih_cell_from_measured_r_and_i(self):
         key = grid_bias.rih_cell_key(46.20, 1.85, 8.12)
