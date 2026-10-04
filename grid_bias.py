@@ -12,13 +12,15 @@ from pathlib import Path
 
 import numpy as np
 
+# size of aq_grid cells (a, q, sin i_free, H)
 A_STEP = 0.2
 Q_STEP = 0.2
 SI_STEP = 0.001
 H_STEP = 0.1
-# model_ae cells: well-measured discovery distance and ecliptic i.
+# size of model_ae cells (r, i)
 R_STEP = 1.0
 I_STEP = 1.0
+# Some helpful constants.
 BOWELL_G = -0.12
 OBLIQUITY_J2000_DEG = 23.4392911
 # rot.f95 equat_ecl; used when matching Detos1 / RADECeclXV
@@ -32,7 +34,65 @@ MODEL_AE_MAX_EXPAND = 8
 
 @dataclass(frozen=True)
 class GridSurvey:
-    """Pencil-beam survey geometry and photometry mapping for grid debiasing."""
+    """Pencil-beam survey geometry and photometry mapping for grid debiasing.
+    
+    Parameters
+    ----------
+    name : str
+        The name of the survey.
+    field_ra_deg : float
+        The right ascension of the field center in degrees.
+    field_dec_deg : float
+        The declination of the field center in degrees.
+    mosaic_width_deg : float
+        The width of the mosaic in degrees.
+    mosaic_height_deg : float
+        The height of the mosaic in degrees.
+    epoch_jd : tuple
+        The JD of the epochs.
+    mag_color_offset : float
+        The color offset of the survey to the OSSOS r_AB system.
+    mag_column : str
+        The column name of the magnitude in the survey catalog.
+    observer_csv : str
+        The path to the observer CSV file.
+    eff_file : str
+        The path to the effective area file.
+    fill_factor : float
+        The fill factor of the survey.
+    paper_reference_jd : float | None
+        The JD of the paper reference.
+    rate_cut_min_arcsec_hr : float
+        The minimum rate cut in arcseconds per hour.
+    rate_cut_max_arcsec_hr : float
+        The maximum rate cut in arcseconds per hour.
+    epoch_layout : str
+        The layout of the epochs.
+    detections_relpath : str
+        The relative path to the detections CSV file.
+    detections_full_name : str
+        The name of the detections CSV file.
+    check_detected_title : str
+        The title of the detected flag.
+    bias_method : str
+        The method of bias correction.
+
+    Attributes
+    ----------
+    n_epochs : int
+        The number of epochs.
+    mosaic_area_deg2 : float
+        The area of the mosaic in square degrees.
+    mosaic_side_deg : float
+        The side length of the equal-area square mosaic in degrees.
+    mag_to_r : function
+        The function to map the survey magnitude onto the OSSOS r_AB system.
+
+    Methods
+    -------
+    mag_to_r(mag: float) -> float
+        Map the survey magnitude onto the OSSOS r_AB system.
+    """
 
     name: str
     field_ra_deg: float
@@ -48,6 +108,7 @@ class GridSurvey:
     paper_reference_jd: float | None = None
     rate_cut_min_arcsec_hr: float = 0.03
     rate_cut_max_arcsec_hr: float = 8.66
+    # if survey requires multiple detection at each epoch, use "subdir"
     epoch_layout: str = "subdir"  # "subdir" → epoch{i}/; "flat" → char root
     detections_relpath: str = "data/detections.csv"
     detections_full_name: str = "detections-full"
@@ -56,12 +117,15 @@ class GridSurvey:
     # "model_ae": (r, i, H) cells; (a, e) from an OSSOS model p(a,e|r,i).
     bias_method: str = "aq_grid"
 
+
     @property
     def n_epochs(self) -> int:
+        """The number of epochs required for a detection."""
         return len(self.epoch_jd)
 
     @property
     def mosaic_area_deg2(self) -> float:
+        """The area of the mosaic in square degrees."""
         return self.mosaic_width_deg * self.mosaic_height_deg
 
     @property
