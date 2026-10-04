@@ -525,10 +525,10 @@ def run_grid_bias(survey: GridSurvey, root: Path, target: int = TARGET_DETECTION
 
 def build_arg_parser(survey: GridSurvey, default_root: Path) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=f"Grid-cell debiasing for {survey.name} (Kavelaars et al. 2022 ac2c72)."
+        description=f"Grid-cell debiasing for {survey.name} (follows Kavelaars et al. 2022 ac2c72)."
     )
-    parser.add_argument("--root", default=str(default_root))
-    parser.add_argument("--target", type=int, default=TARGET_DETECTIONS)
+    parser.add_argument("--root", default=str(default_root), help="Root directory for output")
+    parser.add_argument("--target", type=int, default=TARGET_DETECTIONS, help="Target number of detections per cell")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--check-plots-dir", default=None,
@@ -543,7 +543,7 @@ def build_arg_parser(survey: GridSurvey, default_root: Path) -> argparse.Argumen
         parser.add_argument(
             "--model", default=str(default_orbit_model_path()),
             help="Orbit model file or directory for p(a,e|r,i). Accepts "
-                 "OSSOS Models 1.0 ModelUsed tables and legacy L7 files. "
+                 "OSSOS Models or CFEP L7 file formats. "
                  f"Default: {default_orbit_model_path()}",
         )
     return parser
