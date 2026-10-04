@@ -3,9 +3,11 @@
 Horvitz–Thompson debiasing of pencil-beam trans-Neptunian object (TNO)
 surveys using the OSSOS Survey Simulator (`ossssim`).
 
-Each detection receives a weight \(1/P\), where \(P\) is the probability that
-an object like it would have been detected by the survey. Summing the weights
-estimates the intrinsic population represented by the detected sample.
+Each detection receives a weight $1/P$, where $P$ is the probability that an
+object like it would have been detected by the survey. Summing the weights
+estimates the total population the survey is capable of detecting; see
+[Population estimates](#population-estimates-from-the-weights) for why, and
+for the parts of the population a survey can never see.
 
 ## Requirements
 
@@ -41,10 +43,72 @@ Scattering, resonant, …) in its model proportions, because a short-arc
 detection's population is unknown. The resulting bias therefore depends on
 the orbit model used as the prior.
 
+## Population estimates from the weights
+
+### Why $\hat N = \sum 1/P$ estimates the total population
+
+Suppose the true population has $N$ objects and object $k$ is detected with
+probability $P_k$. Summing $1/P_k$ over the objects that were detected gives
+
+$$
+\mathbb{E}\Big[\sum_{k\,\in\,\text{detected}} \frac{1}{P_k}\Big]
+= \sum_{k\,\in\,\text{all}} P_k \cdot \frac{1}{P_k} = N .
+$$
+
+This is the Horvitz–Thompson estimator. Two consequences that are easy to get
+wrong:
+
+- $P$ is only needed for the objects actually detected. Parts of phase space
+  with no detections are not ignored: on average they are represented by the
+  detections, each of which stands in for $1/P_k$ similar objects.
+- The same weights can be used inside a fit. For a luminosity function,
+  maximising the weighted log-likelihood $\sum_k w_k \log f(H_k \mid \theta)$
+  with $w_k = 1/P_k$ gives a consistent estimate of the shape, and
+  $\sum_k w_k$ over $H < H_{\lim}$ gives its normalisation: the number of
+  objects brighter than $H_{\lim}$.
+
+### What the estimate cannot include
+
+The derivation requires $P_k > 0$ for every object in the population being
+estimated. Objects the survey could never detect have $P = 0$; they never
+appear in the sum, and no reweighting brings them back. For a pencil-beam
+survey these blind regions include:
+
+- **Inclination below the field's ecliptic latitude** ($i < |\beta|$): such
+  orbits never reach the field, so the geometric probability is zero.
+- **Too faint** (apparent magnitude beyond the efficiency limit): at a given
+  distance this sets an $H$ limit, and that limit is brighter for more
+  distant objects.
+- **Sky motion outside the rate cuts**: in practice, objects too distant or
+  too nearby for the search rates.
+
+Orbits that merely happen to be elsewhere during the survey are not a blind
+region: any orbit with $i > |\beta|$ has some chance of crossing the field,
+and that chance is already in the geometric factor of $P$.
+
+So define the estimated population to match what the survey can see (for
+example, "$H_r < H_{\lim}$ and $i > |\beta|$ at the distances sampled"), or
+extrapolate into the blind regions with an explicit model and say so.
+
+### Other cautions
+
+- **Variance.** With few detections, a single object with small $P$ can
+  dominate $\hat N$ and the fitted luminosity function. The estimator is
+  unbiased on average but can be very noisy. Bootstrap over detections, or
+  use a variance estimate that accounts for the weights; a plain weighted
+  likelihood understates the uncertainty because it treats $\sum w_k$ as the
+  number of independent detections.
+- **Model dependence (`model_ae`).** $P$ is averaged over the orbit model's
+  $p(a, e \mid r, i)$, so $\hat N$ and the luminosity-function normalisation
+  assume that model's mix of orbits at each $(r, i)$.
+- **Cell averaging.** $P$ is the average over a cell. This is accurate only
+  if $P$ varies little across the cell, which is why the $H$ step is small
+  (0.1 mag).
+
 ## Surveys
 
 A survey is a `GridSurvey` (from `grid_bias.py`): field centre, mosaic size,
-epoch Julian dates, magnitude column and its offset to OSSOS \(r\), observer
+epoch Julian dates, magnitude column and its offset to OSSOS $r$, observer
 position file, efficiency file, rate cuts, epoch directory layout, and
 `bias_method`.
 
@@ -152,15 +216,16 @@ Written into `<root>`:
   through `MPC` match `CFEPS.detections`; six columns follow:
   - `ifree`, `Omfree`, `omfree`: free elements relative to the Laplace plane
     (`Omfree` and `omfree` are 0 when unknown)
-  - `Hx`: absolute magnitude \(H_r\) used for the cell
+  - `Hx`: absolute magnitude $H_r$ used for the cell
   - `comp`: component from the detections CSV
-  - `bias`: \(P\) for the detection's cell
+  - `bias`: $P$ for the detection's cell
 - `check_plots/`: sampled versus detected RA/Dec and orbital-element
   distributions, one set per detection plus one combined (`all`).
 
-The run ends by printing `sum 1/bias`, the debiased count of objects like
-those detected. It covers only cells that contain detections and is not an
-extrapolation to unsampled parts of (r, i, H) or (a, q, i, H).
+The run ends by printing `sum 1/bias`, the Horvitz–Thompson estimate of the
+population the survey can detect. It excludes regions where the survey has
+zero sensitivity; see
+[What the estimate cannot include](#what-the-estimate-cannot-include).
 
 ## Adding a survey
 
