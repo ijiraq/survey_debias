@@ -1,0 +1,4 @@
+label,alpha,beta,h_b,loglike
+"no measurement error",0.0500,0.2513,11.2490,-29.6951
+"photometric model from .eff",0.0500,0.2487,11.2753,-29.6942
+"photometry + 5% distance error",0.0500,0.2557,11.2420,-29.6807

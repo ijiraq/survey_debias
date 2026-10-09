@@ -1,0 +1,8 @@
+JWST Sample A shape-only MLE (docs demo script).
+alpha hits the lower bound 0.05 in all three treatments:
+with n=20 and most objects near the efficiency drop, the bright-end
+slope is not constrained by the conditional likelihood alone.
+
+no measurement error: alpha=0.0500 beta=0.2513 Hb=11.2490 lnL=-29.6951
+photometric model from .eff: alpha=0.0500 beta=0.2487 Hb=11.2753 lnL=-29.6942
+photometry + 5% distance error: alpha=0.0500 beta=0.2557 Hb=11.2420 lnL=-29.6807
