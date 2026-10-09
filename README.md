@@ -241,3 +241,10 @@ field values) and raise `ValueError` if neither is given.
     python -m unittest test_grid_bias -v
 
 Tests that need survey files not in this repository are skipped.
+
+## Luminosity-function shape fit (documentation)
+
+A project note on the conditional LF *shape* likelihood — with and without
+photometric and distance measurement error — lives in
+[`docs/lf_shape_fit/`](docs/lf_shape_fit/). Build instructions and a JWST
+Sample A demo are in that directory's README.
