@@ -6,8 +6,10 @@ own :class:`GridSurvey` and passes it as ``survey=`` (see ``examples/``).
 from __future__ import annotations
 
 import csv
+import io
 import math
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -25,86 +27,185 @@ BOWELL_G = -0.12
 OBLIQUITY_J2000_DEG = 23.4392911
 # rot.f95 equat_ecl; used when matching Detos1 / RADECeclXV
 F95_OBLIQUITY_ARCSEC = 84381.41
-POINTINGS_TEMPLATE_NAME = "pointings.template"
 TWO_HOURS_DAY = 2.0 / 24.0
 # Minimum model objects retained in an (r, i) window before the window grows.
 MODEL_AE_MIN_CANDIDATES = 50
 MODEL_AE_MAX_EXPAND = 8
+# Detections required per cell before its bias is accepted.
+TARGET_DETECTIONS = 5000
+# Program names a ``[detection_columns]`` table may map to file columns.
+# ``mag`` is the apparent-magnitude column. Other file columns are kept as-is.
+DETECTION_COLUMNS = (
+    "mag", "name", "survey", "block", "a", "e", "i", "d_bary", "q", "ifree",
+    "Omega", "Omfree", "omfree", "comp", "mag_err", "d_bary_err",
+)
+# Columns ``[detection_defaults]`` may fill when the table has none.
+DETECTION_DEFAULTS = ("survey", "block", "comp")
+# Derived quantities, in the order they are appended to the results table.
+_DERIVED_ORDER = (
+    "name", "survey", "block", "filter", "colour_group", "colour",
+    "a", "e", "q", "ifree", "sin_ifree", "Hx", "cell",
+    "block_bias", "bias", "bias_se",
+)
+_CFEPS_ELEMENTS = ("a", "e", "i", "d_bary", "Hx", "ifree")
+# Fields that moved out of the survey file, and where they went.
+REMOVED_FIELDS = {
+    "field_ra_deg": "pointings.list",
+    "field_dec_deg": "pointings.list",
+    "mosaic_width_deg": "pointings.list",
+    "mosaic_height_deg": "pointings.list",
+    "epoch_jd": "pointings.list (one per epoch{i}/ directory)",
+    "observer_csv": "pointings.list (observer column)",
+    "eff_file": "pointings.list ({block}.eff column)",
+    "fill_factor": "pointings.list (fill column)",
+    "epoch_layout": "characterization/{survey}/ (epoch{i}/ directories are found)",
+    "mag_color_offset": "colour.toml (filter - model_band colours)",
+}
 
 
 @dataclass(frozen=True)
 class GridSurvey:
-    """Pencil-beam survey geometry and photometry mapping for grid debiasing.
+    """A debiasing project: detections, column mapping, and photometry.
+
+    Geometry is not part of the survey file. Each survey's pointings,
+    epochs, observer, and efficiency files are read from
+    ``<root>/characterization/{survey}/pointings.list`` (see
+    :mod:`survey_debias.pointings`), and colours from ``colour.toml``.
 
     Parameters
     ----------
     name : str
-        The name of the survey, used in log messages and output headers.
-    field_ra_deg : float
-        ICRS right ascension of the mosaic centre in degrees.
-    field_dec_deg : float
-        ICRS declination of the mosaic centre in degrees.
-    mosaic_width_deg : float
-        Width of the rectangular mosaic in degrees.
-    mosaic_height_deg : float
-        Height of the rectangular mosaic in degrees.
-    epoch_jd : tuple
-        Julian date of each survey epoch (e.g. stack midpoints). A detection
-        requires flag ≥ 4 at every epoch; the first is the element epoch.
-    mag_color_offset : float
-        Added to the catalog magnitude to give OSSOS r_AB
-        (r = mag + mag_color_offset).
-    mag_column : str
-        Name of the magnitude column in the detections CSV.
-    observer_csv : str
-        File name of the observer-position CSV (JPL Horizons vectors) inside
-        each characterization directory.
-    eff_file : str
-        File name of the detection-efficiency file inside each
-        characterization directory.
-    fill_factor : float
-        Fraction of the mosaic area covered by detectors; written into
-        ``pointings.list``.
+        The name of the project, used in log messages and output headers.
+    detection_columns : dict
+        Program column name → column name in the detections table, for
+        every column that is read. ``mag`` is required (the apparent
+        magnitude in the block's filter). ``survey`` and ``block`` select
+        ``characterization/{survey}/{block}.eff``. ``model_ae`` also reads
+        ``d_bary`` and ``i``. ``aq_grid`` also reads ``a``, ``e`` or ``q``,
+        and ``i`` or ``ifree``. Other recognized names are ``name``,
+        ``Omega``, ``Omfree``, ``omfree``, and ``comp``; ``mag_err`` and
+        ``d_bary_err`` are read only by the H-distribution fit.
+    detection_defaults : dict
+        Values of ``survey``, ``block``, or ``comp`` for a table without
+        that column (for example ``survey = "test"``, ``block = "test"``).
+    model_band : str
+        Band H is quoted in; one letter A–z (default ``"r"``).
+    colour_file : str
+        ``colour.toml`` relative to the root (``PhotSpec.COLORS`` layout).
+        When it does not exist ossssim's built-in colours are used.
+    surveys : tuple
+        Survey directories included in the union bias. Empty: every
+        ``characterization/{survey}`` with a ``pointings.list``.
     paper_reference_jd : float | None
-        Optional reference JD from the survey paper (e.g. its orbit-fit
-        epoch). Used for logging and as the JD column in the detections-full
-        output; it is not an observing epoch.
-    rate_cut_min_arcsec_hr : float
-        Minimum sky-motion rate (arcsec/hr) used by the start-up sanity
-        check. The simulator's own rate cut comes from the characterization
-        files.
-    rate_cut_max_arcsec_hr : float
-        Maximum sky-motion rate (arcsec/hr) used by the start-up sanity
-        check.
-    epoch_layout : str
-        ``"subdir"``: one characterization directory per epoch
-        (``epoch1/``, ``epoch2/``, …). ``"flat"``: a single characterization
-        directory (one epoch).
+        Optional reference JD from the survey paper, used for logging and
+        as the JD column in the detections-full output.
+    rate_cut_min_arcsec_hr, rate_cut_max_arcsec_hr : float
+        Sky-motion range used by the start-up sanity check when the ``.eff``
+        file has no ``rate_cut=`` line.
     detections_relpath : str
-        Path of the input detections CSV, relative to the survey root.
+        Path of the input detections CSV, relative to the root.
     detections_full_name : str
-        File name of the output detections-full file written to the survey
-        root.
+        CFEPS detections file written to the root when every detection has
+        ``a``, ``e``, and ``i``.
+    results_name : str
+        Results CSV written to the root.
     check_detected_title : str
         Label for detected objects in the check-plot titles.
     bias_method : str
-        ``"aq_grid"``: cells in (a, q, sin i_free, H) for well-determined
-        orbits. ``"model_ae"``: cells in (r, i, H) with (a, e) drawn from an
-        orbit model p(a, e | r, i).
+        ``"aq_grid"``: cells in (a, q, sin i_free, H). ``"model_ae"``: cells
+        in (r, i, H) with (a, e) drawn from an orbit model p(a, e | r, i).
+    """
 
-    Attributes
-    ----------
-    n_epochs : int
-        Number of epochs at which a detection is required.
-    mosaic_area_deg2 : float
-        Area of the mosaic in square degrees.
-    mosaic_side_deg : float
-        Side of the equal-area square mosaic in degrees.
+    name: str
+    detection_columns: dict[str, str]
+    detection_defaults: dict = field(default_factory=dict)
+    model_band: str = "r"
+    colour_file: str = "colour.toml"
+    surveys: tuple = ()
+    paper_reference_jd: float | None = None
+    rate_cut_min_arcsec_hr: float = 0.03
+    rate_cut_max_arcsec_hr: float = 8.66
+    detections_relpath: str = "data/detections.csv"
+    detections_full_name: str = "detections-full"
+    results_name: str = "bias_results.csv"
+    check_detected_title: str = "detected flag≥4"
+    bias_method: str = "aq_grid"
 
-    Methods
-    -------
-    mag_to_r(mag: float) -> float
-        Map a catalog magnitude onto the OSSOS r_AB system.
+    def __hash__(self) -> int:
+        return hash((self.name, self.detections_relpath, self.bias_method))
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.detection_columns, dict):
+            raise ValueError(
+                "detection_columns must be a table of program name = file column"
+            )
+        known = set(DETECTION_COLUMNS)
+        canon: dict[str, str] = {}
+        owners: dict[str, str] = {}
+        for key, value in dict(self.detection_columns).items():
+            name = str(key).strip()
+            if name not in known:
+                raise ValueError(
+                    f"detection_columns: {key!r} is not a program column. "
+                    f"Known columns: {', '.join(DETECTION_COLUMNS)}."
+                )
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"detection_columns: {name} must name a file column, "
+                    f"got {value!r}"
+                )
+            file_col = value.strip()
+            if file_col in owners:
+                raise ValueError(
+                    f"detection_columns: file column {file_col!r} is assigned "
+                    f"to both {owners[file_col]!r} and {name!r}"
+                )
+            owners[file_col] = name
+            canon[name] = file_col
+        if "mag" not in canon:
+            raise ValueError(
+                "detection_columns must include mag, the magnitude column "
+                "in the detections table"
+            )
+        ordered = {name: canon[name] for name in DETECTION_COLUMNS if name in canon}
+        object.__setattr__(self, "detection_columns", ordered)
+        defaults = {}
+        for key, value in dict(self.detection_defaults or {}).items():
+            name = str(key).strip()
+            if name not in DETECTION_DEFAULTS:
+                raise ValueError(
+                    f"detection_defaults: {key!r} cannot have a default; "
+                    f"use {', '.join(DETECTION_DEFAULTS)}"
+                )
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"detection_defaults: {name} must be a name, got {value!r}")
+            defaults[name] = value.strip()
+        object.__setattr__(self, "detection_defaults", defaults)
+        for name in ("survey", "block"):
+            if name not in ordered and name not in defaults:
+                raise ValueError(
+                    f"{name} needs a [detection_columns] entry or a "
+                    f'[detection_defaults] value (for example {name} = "test")'
+                )
+        object.__setattr__(self, "surveys", tuple(str(s) for s in self.surveys))
+        band = str(self.model_band).strip()
+        if len(band) != 1 or not ("A" <= band <= "z"):
+            raise ValueError(f"model_band {self.model_band!r} must be one letter A-z")
+        object.__setattr__(self, "model_band", band)
+
+    @property
+    def mag_column(self) -> str:
+        """File column for apparent magnitude (``detection_columns['mag']``)."""
+        return self.detection_columns["mag"]
+
+
+@dataclass(frozen=True)
+class FieldView:
+    """Geometry the sampling and plotting helpers read as ``survey=``.
+
+    Built from one ``pointings.list`` tile (or a block's bounding box) by
+    :meth:`survey_debias.pointings.Block.field_view`. ``mosaic_width_deg``
+    is the on-sky width; the RA extent is that over cos(dec).
     """
 
     name: str
@@ -113,40 +214,23 @@ class GridSurvey:
     mosaic_width_deg: float
     mosaic_height_deg: float
     epoch_jd: tuple
-    mag_color_offset: float
-    mag_column: str
-    observer_csv: str
-    eff_file: str
-    fill_factor: float = 1.0
-    paper_reference_jd: float | None = None
+    observer_csv: str = ""
     rate_cut_min_arcsec_hr: float = 0.03
     rate_cut_max_arcsec_hr: float = 8.66
-    epoch_layout: str = "subdir"  # "subdir" → epoch{i}/; "flat" → char root
-    detections_relpath: str = "data/detections.csv"
-    detections_full_name: str = "detections-full"
+    paper_reference_jd: float | None = None
     check_detected_title: str = "detected flag≥4"
-    # "aq_grid": small (a, q, sin i_free, H) cells (well-known orbits).
-    # "model_ae": (r, i, H) cells; (a, e) from an OSSOS model p(a,e|r,i).
-    bias_method: str = "aq_grid"
 
     @property
     def n_epochs(self) -> int:
-        """The number of epochs required for a detection."""
         return len(self.epoch_jd)
 
     @property
     def mosaic_area_deg2(self) -> float:
-        """The area of the mosaic in square degrees."""
         return self.mosaic_width_deg * self.mosaic_height_deg
 
     @property
     def mosaic_side_deg(self) -> float:
-        """Side of the equal-area square mosaic."""
         return math.sqrt(self.mosaic_area_deg2)
-
-    def mag_to_r(self, mag: float) -> float:
-        """Map the survey catalog magnitude onto the OSSOS r_AB system."""
-        return mag + self.mag_color_offset
 
 
 def _require_survey(survey: GridSurvey | None, what: str) -> GridSurvey:
@@ -227,22 +311,19 @@ def bowell_phase_correction(alpha_rad: float, g: float = BOWELL_G) -> float:
 
 
 def apparent_to_Hr(m_survey: float, d_au: float, robs_au: float = 1.0,
-                   g: float = BOWELL_G, color_offset: float | None = None,
-                   survey: GridSurvey | None = None) -> float:
-    """H_r inverted from AppMag with r = Δ = d_bary.
+                   g: float = BOWELL_G, colour: float = 0.0) -> float:
+    """Model-band H inverted from AppMag with r = Δ = d_bary.
 
-    ``color_offset`` maps the survey magnitude onto r_AB (for example +1 for
-    JWST F150W2 or −0.3 for HST STMAG F606W); it defaults to
-    ``survey.mag_color_offset``. Geometry uses the same Bowell G=-0.12 law
-    as OSSSSim rather than a constant +0.35 mag phase offset.
+    ``colour`` is ``filter - model_band`` for the object's spectral group
+    (from ``colour.toml``), the term OSSSSim's ``detos1`` adds to H before
+    computing the magnitude in the block's filter. Geometry uses the same
+    Bowell G=-0.12 law as OSSSSim.
     """
-    if color_offset is None:
-        color_offset = _require_survey(survey, "apparent_to_Hr").mag_color_offset
-    m_r = m_survey + color_offset
     denom = 2.0 * d_au * d_au
     cos_a = max(-1.0, min(1.0, (-robs_au ** 2 + 2.0 * d_au ** 2) / denom))
     alpha = math.acos(cos_a)
-    return m_r - 5.0 * math.log10(d_au * d_au) + bowell_phase_correction(alpha, g)
+    return (m_survey - colour - 5.0 * math.log10(d_au * d_au)
+            + bowell_phase_correction(alpha, g))
 
 
 def geometric_detection_prob(area_deg2: float, inc_deg: float, beta_deg: float) -> float:
@@ -384,11 +465,11 @@ def los_circular_elements(ra_deg: float, dec_deg: float, a_au: float,
         math.cos(dec) * math.sin(ra),
         math.sin(dec),
     )
-    b = 2.0 * sum(o * l for o, l in zip(obs, los))
+    b = 2.0 * sum(o * u_k for o, u_k in zip(obs, los))
     c = sum(o * o for o in obs) - a_au * a_au
     disc = max(0.0, b * b - 4.0 * c)
     t = 0.5 * (-b + math.sqrt(disc))
-    obj_icrf = tuple(o + t * l for o, l in zip(obs, los))
+    obj_icrf = tuple(o + t * u_k for o, u_k in zip(obs, los))
     obj_ecl = icrf_to_ecliptic(*obj_icrf)
     return circular_elements_through_ecliptic_xyz(*obj_ecl)
 
@@ -526,16 +607,21 @@ def rih_bounds_from_key(key: tuple) -> dict:
     }
 
 
-def default_orbit_model_path() -> Path:
-    """Local OSSOS Models 1.0 ``ModelUsed`` tables (all components).
+MODEL_PATH_ENV = "SURVEY_DEBIAS_MODEL"
 
-    The full tables are not stored in this repository. Place them in
-    ``Models/OSSOS/``. Override with ``--model PATH`` (file or directory).
-    A short header sample for tests
-    lives under ``tests/data/OSSOS/``. Legacy L7-style files remain
-    readable by :meth:`OrbitModelCatalog.from_path`.
+
+def default_orbit_model_path(root=None) -> Path:
+    """Default orbit-model file or directory for ``model_ae`` debiasing.
+
+    ``$SURVEY_DEBIAS_MODEL`` if set, else ``<root>/Models/OSSOS`` (``root``
+    defaults to the current directory). The full OSSOS ModelUsed tables are
+    not shipped with this package; a short header sample for tests lives
+    under ``tests/data/OSSOS/``. Override with ``--model PATH``.
     """
-    return Path(__file__).resolve().parent / "Models" / "OSSOS"
+    env = os.environ.get(MODEL_PATH_ENV)
+    if env:
+        return Path(env).expanduser()
+    return Path(root or Path.cwd()) / "Models" / "OSSOS"
 
 
 def _detect_orbit_model_format(path: Path) -> str:
@@ -769,39 +855,411 @@ class OrbitModelCatalog:
         return float(self.a[idx]), float(self.e[idx]), str(self.comp[idx])
 
 
-def load_detections(path, survey: GridSurvey) -> list[dict]:
-    """Read a survey detections CSV and assign bias cells.
+class Detections(list):
+    """Detection rows, the file columns they came from, and derived columns.
 
-    ``aq_grid``: (a, q, sin i_free, H) from catalog elements.
-    ``model_ae``: (r, ecliptic i, H); catalog (a, e) kept for bookkeeping only.
-
-    Uses ``survey.mag_column`` and ``survey.mag_color_offset`` for H_r.
-    If the CSV has an ``ifree`` column, that value is used; otherwise
-    i_free is computed from ecliptic i with Ω=0.
+    Each row holds the canonical values the run uses. Original cell text is
+    on ``_source``; names in ``_computed`` were derived for that row.
+    ``input_columns`` is the file header. ``columns_used`` maps each program
+    name that was read (including ``mag``) to the file column it came from.
+    ``computed_columns`` is the derived quantities across the table, in
+    results-file order (``bias`` is added after the run). ``notes`` describes
+    those derivations.
     """
+
+    def __init__(self, rows=(), *, input_columns, computed_columns,
+                 column_map, columns_used, notes=()):
+        super().__init__(rows)
+        self.input_columns = list(input_columns)
+        self.computed_columns = list(computed_columns)
+        self.column_map = dict(column_map)
+        self.columns_used = dict(columns_used)
+        self.notes = list(notes)
+
+
+def _table_lines(path: Path) -> list[str]:
+    """CSV records, skipping blank lines and ``#`` comments before the header."""
+    lines = path.read_text().splitlines()
+    start = 0
+    while start < len(lines):
+        stripped = lines[start].strip()
+        if stripped and not stripped.startswith("#"):
+            break
+        start += 1
+    if start >= len(lines):
+        raise ValueError(f"{path}: no header row")
+    return lines[start:]
+
+
+def _bind_columns(path, fieldnames: list[str], survey: GridSurvey) -> dict[str, str]:
+    """Program column → file column for each ``detection_columns`` entry."""
+    fields = set(fieldnames)
+    missing = [
+        f"{canon}={file_col}"
+        for canon, file_col in survey.detection_columns.items()
+        if file_col not in fields
+    ]
+    if missing:
+        have = ", ".join(fieldnames) or "(none)"
+        raise ValueError(
+            f"{path}: detection_columns names column(s) not in the file: "
+            f"{', '.join(missing)}. File columns: {have}."
+        )
+    return dict(survey.detection_columns)
+
+
+def _missing_required(bound: dict[str, str], survey: GridSurvey) -> list[str]:
+    missing = []
+    if "mag" not in bound:
+        missing.append("mag")
+    if survey.bias_method == "model_ae":
+        for name in ("d_bary", "i"):
+            if name not in bound:
+                missing.append(name)
+    elif survey.bias_method == "aq_grid":
+        if "d_bary" not in bound:
+            missing.append("d_bary")
+        if "a" not in bound:
+            missing.append("a")
+        if "e" not in bound and "q" not in bound:
+            missing.append("e or q")
+        if "i" not in bound and "ifree" not in bound:
+            missing.append("i or ifree")
+    else:
+        raise ValueError(f"unknown bias_method {survey.bias_method!r}")
+    return missing
+
+
+def _require_columns(path, fieldnames, missing: list[str], survey: GridSurvey) -> None:
+    if not missing:
+        return
+    have = ", ".join(fieldnames) or "(none)"
+    if survey.bias_method == "model_ae":
+        need = "mag, d_bary, and i"
+    else:
+        need = "mag, a, d_bary, e or q, and i or ifree"
+    declared = ", ".join(
+        f"{k}={v}" for k, v in survey.detection_columns.items()
+    )
+    raise ValueError(
+        f"{path}: missing required column(s): {', '.join(missing)}. "
+        f"{survey.bias_method} reads {need} from [detection_columns]. "
+        f"Declared: {declared}. File columns: {have}."
+    )
+
+
+def _cell_text(source: dict, file_col: str | None):
+    if file_col is None:
+        return None
+    value = source.get(file_col)
+    if value is None or str(value).strip() == "":
+        return None
+    return str(value).strip()
+
+
+def _parse_float(text: str, where: str, column: str) -> float:
+    try:
+        return float(text)
+    except ValueError as ex:
+        raise ValueError(
+            f"{where}: column {column!r} value {text!r} is not a number"
+        ) from ex
+
+
+def _fill_orbital_elements(a, e, q, where: str):
+    """Fill whichever of ``a``, ``e``, ``q`` is missing from the other two."""
+    computed = []
+    if a is None and e is not None and q is not None:
+        if e >= 1.0:
+            raise ValueError(f"{where}: cannot derive a from e={e} and q={q}")
+        a = q / (1.0 - e)
+        computed.append("a")
+    if e is None and a is not None and q is not None:
+        if a == 0.0:
+            raise ValueError(f"{where}: cannot derive e from a=0")
+        e = 1.0 - q / a
+        computed.append("e")
+    if q is None and a is not None and e is not None:
+        q = a * (1.0 - e)
+        computed.append("q")
+    return a, e, q, computed
+
+
+def _derivation_notes(rows: list[dict]) -> list[str]:
+    computed = {name for row in rows for name in row["_computed"]}
+    notes = []
+    if "q" in computed:
+        notes.append("q = a*(1-e)")
+    if "e" in computed:
+        notes.append("e = 1 - q/a")
+    if "a" in computed:
+        notes.append("a = q/(1-e)")
+    if any(
+        "ifree" in row["_computed"] and row.get("Omega") is None for row in rows
+    ):
+        notes.append(
+            "ifree from ecliptic i and a with Omega = 0 "
+            "(no Omega value on that row)"
+        )
+    if "name" in computed:
+        notes.append("name is the 1-based row number (no name column)")
+    return notes
+
+
+def load_detections(path, survey: GridSurvey, colour_for=None) -> Detections:
+    """Read a detections table and assign bias cells.
+
+    ``colour_for(survey, block, comp)`` returns ``(filter, colour, group)``:
+    the block's filter, ``filter - model_band`` for the object's spectral
+    group, and that group's name (see :class:`survey_debias.pointings.Project`).
+    Without it the colour is 0 and the filter blank.
+
+    The reader keeps every column in the file. Columns listed in
+    ``survey.detection_columns`` are the ones interpreted (program name =
+    file column), including ``mag``. A column that is not listed is kept
+    in the results and is not used for the cell.
+
+    ``model_ae`` requires ``mag``, ``d_bary``, and ecliptic ``i`` in that
+    table. ``a`` and ``e`` are read only when listed. ``aq_grid`` also
+    requires ``a`` and either ``e`` or ``q``, and ``i`` or ``ifree``.
+
+    Blank optional cells are absent. When two of ``a``, ``e``, and ``q``
+    are present, the third is derived. ``ifree`` is taken from the file
+    when present; otherwise it is computed from ecliptic ``i`` and ``a``
+    (``Omega`` when that column has a value, otherwise 0). ``Hx`` is always
+    computed from the magnitude and ``d_bary``.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"detections file not found: {path}")
+    reader = csv.DictReader(_table_lines(path))
+    if not reader.fieldnames:
+        raise ValueError(f"{path}: no header row")
+    if any(h is None or not str(h).strip() for h in reader.fieldnames):
+        raise ValueError(f"{path}: header has a blank column name")
+    fieldnames = [str(h).strip() for h in reader.fieldnames]
+    if len(set(fieldnames)) != len(fieldnames):
+        raise ValueError(f"{path}: duplicate column name in the header")
+    reader.fieldnames = fieldnames
+    bound = _bind_columns(path, fieldnames, survey)
+    _require_columns(path, fieldnames, _missing_required(bound, survey), survey)
+
     rows = []
-    with Path(path).open() as fh:
-        for row in csv.DictReader(fh):
-            a, e, i = float(row["a"]), float(row["e"]), float(row["i"])
-            d = float(row["d_bary"])
-            mag = float(row[survey.mag_column])
-            hx = apparent_to_Hr(mag, d, survey=survey)
-            q = a * (1.0 - e)
-            if "ifree" in row and str(row["ifree"]).strip():
-                ifree = float(row["ifree"])
+    for number, raw in enumerate(reader, start=1):
+        where = f"{path}: row {number}"
+        source = {
+            key: ("" if value is None else str(value).strip())
+            for key, value in raw.items()
+            if key is not None
+        }
+        parsed = {}
+        for canon, file_col in bound.items():
+            if canon == "mag":
+                continue
+            text = _cell_text(source, file_col)
+            if text is None:
+                parsed[canon] = None
+            elif canon in ("name", "comp", "survey", "block"):
+                parsed[canon] = text
             else:
-                ifree = compute_ifree(i, 0.0, a)
-            if survey.bias_method == "model_ae":
-                cell = rih_cell_key(d, i, hx)
-            else:
-                cell = cell_key(a, q, math.sin(math.radians(ifree)), hx)
-            rows.append({
-                **row, "a": a, "e": e, "i": i, "d_bary": d, "q": q,
-                "Hx": hx, "ifree": ifree, "mag": mag,
-                "sin_ifree": math.sin(math.radians(ifree)),
-                "cell": cell,
-            })
-    return rows
+                parsed[canon] = _parse_float(text, where, file_col)
+        mag_file = bound["mag"]
+        mag_text = _cell_text(source, mag_file)
+        if mag_text is None:
+            raise ValueError(f"{where}: blank magnitude in column {mag_file!r}")
+        mag = _parse_float(mag_text, where, mag_file)
+        computed: list[str] = []
+
+        name = parsed.get("name")
+        if not name:
+            name = str(number)
+            computed.append("name")
+        for key in DETECTION_DEFAULTS:
+            if parsed.get(key) is None and key in survey.detection_defaults:
+                parsed[key] = survey.detection_defaults[key]
+                if key != "comp":
+                    computed.append(key)
+        for key in ("survey", "block"):
+            if not parsed.get(key):
+                raise ValueError(
+                    f"{where}: blank {key}; fill the column or set "
+                    f"[detection_defaults] {key}"
+                )
+        filt, colour, group = "", 0.0, "default"
+        if colour_for is not None:
+            try:
+                filt, colour, group = colour_for(
+                    parsed["survey"], parsed["block"], parsed.get("comp"))
+            except (OSError, ValueError) as ex:
+                raise ValueError(f"{where}: {ex}") from None
+        computed.extend(("filter", "colour_group", "colour"))
+        i = parsed.get("i")
+        d = parsed.get("d_bary")
+        if d is None:
+            raise ValueError(f"{where}: blank d_bary")
+        if survey.bias_method == "model_ae" and i is None:
+            raise ValueError(f"{where}: blank i")
+
+        a, e, q, derived_orbit = _fill_orbital_elements(
+            parsed.get("a"), parsed.get("e"), parsed.get("q"), where,
+        )
+        computed.extend(derived_orbit)
+        hx = apparent_to_Hr(mag, d, colour=colour)
+        computed.append("Hx")
+
+        ifree = parsed.get("ifree")
+        if ifree is None and i is not None and a is not None:
+            node = parsed.get("Omega")
+            ifree = compute_ifree(i, 0.0 if node is None else node, a)
+            computed.append("ifree")
+        sin_ifree = None
+        if ifree is not None:
+            sin_ifree = math.sin(math.radians(ifree))
+            computed.append("sin_ifree")
+
+        if survey.bias_method == "model_ae":
+            cell = rih_cell_key(d, i, hx)
+        elif a is None or q is None or ifree is None or sin_ifree is None:
+            raise ValueError(
+                f"{where}: aq_grid needs a, q (or e), d_bary, and i or ifree"
+            )
+        else:
+            cell = cell_key(a, q, sin_ifree, hx)
+        computed.append("cell")
+
+        row = {
+            "name": name,
+            "survey": parsed["survey"],
+            "block": parsed["block"],
+            "filter": filt,
+            "colour_group": group,
+            "colour": colour,
+            "mag": mag,
+            "d_bary": d,
+            "Hx": hx,
+            "cell": cell,
+            "_source": source,
+            "_computed": computed,
+        }
+        for key, value in (
+            ("a", a), ("e", e), ("i", i), ("q", q), ("ifree", ifree),
+            ("sin_ifree", sin_ifree), ("Omega", parsed.get("Omega")),
+            ("Omfree", parsed.get("Omfree")), ("omfree", parsed.get("omfree")),
+            ("comp", parsed.get("comp")),
+        ):
+            if value is not None:
+                row[key] = value
+        rows.append(row)
+
+    computed_names = {name for row in rows for name in row["_computed"]}
+    computed_columns = [name for name in _DERIVED_ORDER if name in computed_names]
+    computed_columns.extend(
+        name for name in computed_names if name not in computed_columns
+    )
+    return Detections(
+        rows,
+        input_columns=fieldnames,
+        computed_columns=computed_columns,
+        column_map=survey.detection_columns,
+        columns_used=dict(bound),
+        notes=_derivation_notes(rows),
+    )
+
+
+def _computed_value(row: dict, name: str):
+    """Value of a derived column, blank when this row did not derive it."""
+    if name not in _BIAS_COLUMNS and name not in row.get("_computed", ()):
+        return None
+    return row.get(name)
+
+
+_BIAS_COLUMNS = ("block_bias", "bias", "bias_se")
+BIAS_MODES = ("union", "block")
+
+
+def _format_computed(name: str, value) -> str:
+    if value is None:
+        return ""
+    if name == "cell":
+        return str(tuple(value))
+    if name in {"name", "comp"} or isinstance(value, str):
+        return str(value)
+    number = float(value)
+    if name == "Hx":
+        return f"{number:.4f}"
+    if name == "colour":
+        return f"{number:.4f}"
+    if name in _BIAS_COLUMNS:
+        return f"{number:.7g}"
+    return f"{number:.6g}"
+
+
+def write_bias_results(out_path, detections: Detections, survey: GridSurvey,
+                       bias_mode: str = "union", colour_note: str = "") -> None:
+    """Write input columns, derived columns, and bias.
+
+    A derived name that is already a column in the file is written as
+    ``<name>_computed``. Comment lines record the detection columns, the
+    colours, how each derived quantity was obtained, and ``bias_mode``:
+    ``union`` (bias is the sum over every block of the project) or
+    ``block`` (bias is the detection's own block).
+    """
+    if bias_mode not in BIAS_MODES:
+        raise ValueError(f"bias_mode must be one of {BIAS_MODES}")
+    computed = list(detections.computed_columns)
+    for name in _BIAS_COLUMNS:
+        if any(name in row for row in detections) and name not in computed:
+            computed.append(name)
+    computed_headers = [
+        f"{name}_computed" if name in detections.input_columns else name
+        for name in computed
+    ]
+    lines = [
+        f"# survey: {survey.name}",
+        f"# bias_method: {survey.bias_method}",
+        f"# bias_mode: {bias_mode}",
+        "# input columns: " + (", ".join(detections.input_columns) or "(none)"),
+        "# detection columns: " + ", ".join(
+            f"{k}={v}" for k, v in detections.columns_used.items()
+        ),
+    ]
+    if survey.detection_defaults:
+        lines.append("# detection defaults: " + ", ".join(
+            f"{k}={v}" for k, v in survey.detection_defaults.items()))
+    lines.append(f"# model_band {survey.model_band}; colour = filter - model_band"
+                 + (f" ({colour_note})" if colour_note else ""))
+    lines.append("# computed columns: " + (", ".join(computed_headers) or "(none)"))
+    for note in detections.notes:
+        lines.append(f"# derived: {note}")
+    lines.append(
+        "# Hx = mag - colour - 5log10(r Δ) + 2.5log10(Bowell Φ), "
+        "r = Δ = d_bary, G=-0.12"
+    )
+    if bias_mode == "union":
+        lines.append(
+            "# bias = sum of block_bias over every block of the surveys in the "
+            "project (P(detect) in any block); bias_se adds the blocks' MC errors"
+        )
+    out_lines = ["\n".join(lines)]
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow([*detections.input_columns, *computed_headers])
+    for row in detections:
+        source = row["_source"]
+        values = [source.get(col, "") for col in detections.input_columns]
+        values.extend(
+            _format_computed(name, _computed_value(row, name)) for name in computed
+        )
+        writer.writerow(values)
+    out_lines.append(buffer.getvalue().rstrip("\n"))
+    Path(out_path).write_text("\n".join(out_lines) + "\n")
+
+
+def can_write_detections_full(detections) -> bool:
+    """True when every row has the elements the CFEPS detections file stores."""
+    return bool(detections) and all(
+        row.get(key) is not None for row in detections for key in _CFEPS_ELEMENTS
+    )
 
 
 # CFEPS.detections columns, then the six ac2c72 grid-debiasing fields.
@@ -849,7 +1307,7 @@ def write_detections_full(out_path, detections: list[dict], survey: GridSurvey,
             f"# File: {survey.detections_full_name}\n"
             f"#\n"
             f"# Grid debiasing ac2c72; {survey.name}\n"
-            f"# H_r from {survey.mag_column}{survey.mag_color_offset:+.1f} "
+            f"# H_{survey.model_band} from {survey.mag_column} - colour "
             f"- 5log10(r Δ) + 2.5log10(Bowell Φ), r=Δ=d_bary, G=-0.12\n"
             f"# Extra after MPC: ifree Omfree omfree (Laplace-free elements; "
             f"Omfree=omfree=0 if unknown), Hx, comp, bias\n"
@@ -857,21 +1315,26 @@ def write_detections_full(out_path, detections: list[dict], survey: GridSurvey,
             f"{grid_lines}"
             f"#\n"
         )
-    ref_jd = survey.paper_reference_jd or survey.epoch_jd[0]
-    nobs = survey.n_epochs
     lines = [header_lines, DETECTIONS_FULL_COLUMNS]
     for d in detections:
         name = str(d["name"])
+        ref_jd = survey.paper_reference_jd or d.get("field_jd", 0.0)
+        nobs = int(d.get("n_epochs", 1))
+        filt = d.get("filter") or survey.model_band
         omfree = float(d.get("Omfree") or 0.0)
         omegafree = float(d.get("omfree") or 0.0)
+        comp = d.get("comp")
+        if comp is None or str(comp).strip() == "":
+            comp = "-"
         # After e: e_e, i, e_i, Omega, e_Omega, omega, e_omega, tperi, e_tperi
         lines.append(
-            f"cla m -1 -1 S {name:7s} {d['Hx']:.2f} 0.100 r {d['Hx']:.2f} {d['d_bary']:.3f} 0.100 "
+            f"cla m -1 -1 S {name:7s} {d.get('mag', d['Hx']):.2f} 0.100 {filt} "
+            f"{d['Hx']:.2f} {d['d_bary']:.3f} 0.100 "
             f"{nobs} 0.0000 0.083 0.073 0.311 0.343 {d['a']:11.6f} 0.1012 {d['e']:.6f} 0.001009 "
             f"{d['i']:6.3f} 0.100 0.000 0.100 0.000 0.100 0.000 0.100 "
-            f"{survey.field_ra_deg:.3f} {survey.field_dec_deg:.3f} {ref_jd:.5f} 0.40 {name:7s} "
+            f"{d.get('field_ra', 0.0):.3f} {d.get('field_dec', 0.0):.3f} {ref_jd:.5f} 0.40 {name:7s} "
             f"{d['ifree']:6.3f} {omfree:6.3f} {omegafree:6.3f} "
-            f"{d['Hx']:.2f} {d['comp']} {d['bias']:.7f}"
+            f"{d['Hx']:.2f} {comp} {d['bias']:.7f}"
         )
     Path(out_path).write_text("\n".join(lines) + "\n")
 
@@ -889,62 +1352,6 @@ def sample_aq(rng: np.random.Generator, a_bounds: tuple, q_bounds: tuple,
     raise RuntimeError(
         f"empty (a,q) cell a=[{a0}, {a1}) q=[{q0}, {q1}); no bound orbit with q < a"
     )
-
-
-def render_pointings_text(template: str, epoch: int, jd: float,
-                          survey: GridSurvey | None = None) -> str:
-    """Fill pointings.template for one epoch. GetSurvey reads pointings.list."""
-    surv = _require_survey(survey, "render_pointings_text")
-    text = template.format(
-        epoch=epoch,
-        jd=jd,
-        ra=surv.field_ra_deg,
-        dec=surv.field_dec_deg,
-        side=surv.mosaic_side_deg,
-        width=surv.mosaic_width_deg,
-        height=surv.mosaic_height_deg,
-        fill=surv.fill_factor,
-        observer_csv=surv.observer_csv,
-        eff_file=surv.eff_file,
-    )
-    if not text.endswith("\n"):
-        text += "\n"
-    return text
-
-
-def setup_pointings(char_root, template_path=None,
-                    survey: GridSurvey | None = None) -> list:
-    """Write gitignored pointings.list from characterization/pointings.template.
-
-    Detos1/GetSurvey always open `{survey_dir}/pointings.list`. Keep the
-    committed source as a template and regenerate the list at run time so
-    pulling this branch does not require resetting those files.
-
-    ``epoch_layout='subdir'`` (one directory per epoch) writes
-    ``epoch{i}/pointings.list``. ``epoch_layout='flat'`` (single epoch)
-    writes ``pointings.list`` in ``char_root``.
-    """
-    surv = _require_survey(survey, "setup_pointings")
-    char_root = Path(char_root)
-    template_path = Path(template_path) if template_path else (
-        char_root / POINTINGS_TEMPLATE_NAME
-    )
-    template = template_path.read_text()
-    written = []
-    if surv.epoch_layout == "flat":
-        dests = [(char_root / "pointings.list", 1, surv.epoch_jd[0])]
-    else:
-        dests = [
-            (char_root / f"epoch{idx}" / "pointings.list", idx, jd)
-            for idx, jd in enumerate(surv.epoch_jd, start=1)
-        ]
-    for dest, idx, jd in dests:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        text = render_pointings_text(template, idx, jd, survey=surv)
-        if not dest.exists() or dest.read_text() != text:
-            dest.write_text(text)
-        written.append(dest)
-    return written
 
 
 def icrs_los_unit(ra_deg: float, dec_deg: float) -> np.ndarray:
@@ -1170,7 +1577,10 @@ def sample_mosaic_icrs(rng: np.random.Generator,
                        height_deg: float | None = None,
                        survey: GridSurvey | None = None
                        ) -> tuple[float, float]:
-    """Uniform ICRS (RA, Dec) inside the rectangular mosaic pointing."""
+    """Uniform (RA, Dec) in the rectangle; width is on-sky, as in getsur.f95.
+
+    The RA half-extent is ``width / 2 / cos(dec)`` at the field centre.
+    """
     if side_deg is not None:
         width_deg = side_deg if width_deg is None else width_deg
         height_deg = side_deg if height_deg is None else height_deg
@@ -1180,8 +1590,9 @@ def sample_mosaic_icrs(rng: np.random.Generator,
         dec_deg = surv.field_dec_deg if dec_deg is None else dec_deg
         width_deg = surv.mosaic_width_deg if width_deg is None else width_deg
         height_deg = surv.mosaic_height_deg if height_deg is None else height_deg
+    half_ra = 0.5 * width_deg / math.cos(math.radians(dec_deg))
     return (
-        float(ra_deg + rng.uniform(-0.5 * width_deg, 0.5 * width_deg)),
+        float(ra_deg + rng.uniform(-half_ra, half_ra)),
         float(dec_deg + rng.uniform(-0.5 * height_deg, 0.5 * height_deg)),
     )
 
@@ -1352,6 +1763,7 @@ def write_bias_check_plots(out_dir, sampled: dict, detected: dict, tag: str,
     detected = as_check_arrays(detected)
     n_s = int(sampled["ra"].size)
     n_d = int(detected["ra"].size)
+    width_deg = width_deg / math.cos(math.radians(field_dec))
     half_w = 0.5 * width_deg
     half_h = 0.5 * height_deg
     pad_w = 0.4 * width_deg

@@ -1,0 +1,17 @@
+# Example characterization/{survey}/pointings.list (OSSSSim getsur.f95 formats).
+# Every line ends with: JD fill observer {block}.eff
+#   observer: a JPL Horizons vector CSV in this directory, or an MPC code.
+#   {block}.eff: lines with the same .eff are tiles of one block.
+#
+# Rectangle: on-sky width and height [deg], then RA Dec (decimal or h:m:s d:m:s).
+0.2236068 0.2236068 209.3875 -10.865278 2459969.32118 1.0 JWST.csv sampleA.eff
+rect 0.1111111 0.1666667 14:07:53.33 -11:21:38 2452672.8585 0.9 HST.csv N26.eff
+# MegaCam footprint centred on RA Dec.
+ears 203.122042 -9.517750 2456293.5 0.9 568 13AE.eff
+ears 204.122042 -9.517750 2456293.5 0.9 568 13AE.eff
+# Polygon: n, centre RA Dec, then n lines of "dx dy" offsets in degrees.
+poly 4 210.0 -10.0 2456293.5 1.0 568 poly.eff
+-0.1 -0.1
+0.1 -0.1
+0.1 0.1
+-0.1 0.1

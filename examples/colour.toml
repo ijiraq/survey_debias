@@ -1,0 +1,43 @@
+# Object colours by spectral group, in the ossssim.color.PhotSpec layout.
+# Each table is a spectral group; each entry is a band ratio "X-g" in mag.
+# Filters are single letters A-z (OSSSSim filter_to_index), matching the
+# filter= line of each block's .eff file.
+#
+# A detection's spectral group is chosen from its comp value: the first
+# group whose name appears in comp (so comp "cold_classical" uses [cold]),
+# otherwise [default]. Its colour is (block filter) - model_band, applied
+# as H_filter = H_model + colour, as OSSSSim's detos1 does.
+
+[default]
+"g-g" = 0.0
+"r-g" = -0.7
+"i-g" = -1.2
+"z-g" = -1.7
+"u-g" = 0.3
+"V-g" = 0.5
+"B-g" = 0.1
+"R-g" = -0.8
+"I-g" = -1.2
+"w-g" = -0.8
+"J-g" = -1.5
+"H-g" = -1.6
+# JWST NIRCam F150W2: m_r = m_F150W2 + 1
+"W-g" = -1.7
+# HST ACS F606W STMAG: r_AB = STMAG - 0.3
+"F-g" = -0.4
+
+[cold]
+"g-g" = 0.0
+"r-g" = -0.7
+"i-g" = -1.2
+"z-g" = -1.7
+"u-g" = 0.3
+"V-g" = 0.5
+"B-g" = 0.1
+"R-g" = -0.8
+"I-g" = -1.2
+"w-g" = -0.8
+"J-g" = -1.5
+"H-g" = -1.6
+"W-g" = -1.7
+"F-g" = -0.4

@@ -1,0 +1,42 @@
+# JWST GO 1568 Sample A (Eduardo et al. 2026, AJ 172, 187).
+# Seed for jwst-tno-followup:
+#   survey_debias --survey jwst_sample_a.toml --root .
+#
+# Short arcs do not constrain (a, e), so this survey uses model_ae.
+#
+# Geometry lives with the characterization, not here:
+#   characterization/JWST_A/epoch{1,2,3}/pointings.list
+#     0.22360679774997896 0.22360679774997896 209.3875 -10.865278 2459969.32118 1.0 JWST.csv sampleA.eff
+#     (epoch2: JD 2459973.96785, epoch3: JD 2459979.90854)
+#   characterization/JWST_A/epoch{1,2,3}/sampleA.eff   (filter= W)
+#   characterization/JWST_A/epoch{1,2,3}/JWST.csv
+# and colours in colour.toml (see examples/colour.toml: "W-g" = -1.7 puts
+# F150W2 one magnitude brighter than r).
+
+[survey]
+name = "JWST Sample A"
+model_band = "r"
+colour_file = "colour.toml"
+paper_reference_jd = 2459974.5  # orbit-fit reference, not a visit
+rate_cut_min_arcsec_hr = 0.03
+rate_cut_max_arcsec_hr = 8.66
+detections_relpath = "data/jwst_sampleA.csv"
+detections_full_name = "JWST-free-cla_m.detections-full"
+check_detected_title = "detected flag≥4 at all 3 epochs"
+bias_method = "model_ae"
+
+# Program name = column in the detections table. These are the columns read.
+# model_ae requires mag, d_bary, and i. Omit a or e when the table has neither.
+[detection_columns]
+mag = "m_f150w2"
+name = "name"
+a = "a"
+e = "e"
+i = "i"
+d_bary = "d_bary"
+comp = "comp"
+
+# The catalogue has no survey or block column: every row is JWST_A/sampleA.
+[detection_defaults]
+survey = "JWST_A"
+block = "sampleA"
