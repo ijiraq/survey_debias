@@ -5,3 +5,6 @@ Models/OSSOS/*-ModelUsed.dat
 
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/

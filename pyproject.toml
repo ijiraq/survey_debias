@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "survey_debias"
+version = "0.1.0"
+description = "Horvitz–Thompson debiasing of pencil-beam TNO surveys with the OSSOS Survey Simulator."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "astropy",
+    "matplotlib",
+    "OSSSurveySimulator",
+]
+
+[project.optional-dependencies]
+fit = ["scipy", "emcee", "corner"]
+
+[project.scripts]
+survey_debias = "survey_debias.cli:main"
+survey_debias_hfit = "survey_debias.hfit_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

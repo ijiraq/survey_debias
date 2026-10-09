@@ -1,0 +1,39 @@
+# N26 HST heliostack (Napier et al. 2026, PSJ 7, 117): reanalysis of the
+# Bernstein et al. 2004 GO-9433 ACS/WFC F606W field.
+# Seed for hst-tno-followup:
+#   survey_debias --survey hst_n26.toml --root .
+#
+# Orbits are well determined, so this survey uses aq_grid.
+#
+# Geometry lives with the characterization, not here:
+#   characterization/N26/pointings.list   (single 15-day heliostack)
+#     rect 0.1111111 0.1666667 14:07:53.33 -11:21:38 2452672.8585 1.0 HST.csv N26.eff
+#   characterization/N26/N26.eff          (filter= F)
+#   characterization/N26/HST.csv
+# and colours in colour.toml ("F-g" = -0.4: r_AB = STMAG_F606W - 0.3).
+
+[survey]
+name = "N26 heliostack"
+model_band = "r"
+paper_reference_jd = 2452672.8585
+rate_cut_min_arcsec_hr = 0.05
+rate_cut_max_arcsec_hr = 6.4
+detections_relpath = "data/n26_detections.csv"
+detections_full_name = "N26-free-cla_m.detections-full"
+check_detected_title = "detected flag≥4 (single 15-day stack)"
+bias_method = "aq_grid"
+
+# Program name = column in the detections table. These are the columns read.
+# aq_grid requires mag, a, d_bary, e or q, and i or ifree.
+[detection_columns]
+mag = "m_stmag"
+name = "name"
+a = "a"
+e = "e"
+i = "i"
+d_bary = "d_bary"
+comp = "comp"
+
+[detection_defaults]
+survey = "N26"
+block = "N26"
