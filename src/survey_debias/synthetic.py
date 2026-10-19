@@ -39,7 +39,10 @@ def inject(char_root, survey: str, model: ModelPopulation, theta, colour: float,
            sigma_c: float, h_range, n_plants: int, seed: int, cut: SampleCut | None = None,
            colour_file=None, form: str = "tapered", exclude_blocks=(), model_band: str = "r"
            ) -> list[dict]:
-    """Synthetic catalogue rows (name, block, mag, d_bary, i, H_r, colour) for one survey."""
+    """Synthetic catalogue rows (name, block, mag, d_bary, H, i, H_r, colour) for one survey.
+
+    ``H`` is the catalogue H in the survey's filter; ``H_r`` and ``colour`` are the truth.
+    """
     from .colours import load_colours
     from .grid_bias_run import GridBiasSimulator, _TileSampler, attributed_to
 
@@ -85,9 +88,13 @@ def inject(char_root, survey: str, model: ModelPopulation, theta, colour: float,
             q_max = max(q_max, q)
             for _ in range(rng.poisson(q)):
                 row = rows[0]
+                mag = float(row["m_rand"].value)
+                # Catalogue H as the surveys compute it: the measured magnitude less
+                # the true distance and phase term (m_int - H).
+                h_cat = mag - (float(row["m_int"].value) - h_f)
                 out.append({
                     "name": f"S{survey[:4]}{len(out):05d}", "block": name,
-                    "mag": float(row["m_rand"].value), "d_bary": float(row["r"].value),
+                    "mag": mag, "d_bary": float(row["r"].value), "H": h_cat,
                     "i": inc, "H_r": float(h_r[j]), "colour": float(c[j]), "comp": "cold",
                 })
         print(f"  {survey}/{name}: {sum(o['block'] == name for o in out)} synthetic "
@@ -101,7 +108,7 @@ def inject(char_root, survey: str, model: ModelPopulation, theta, colour: float,
 def write_catalogue(rows: list[dict], path, note: str = "") -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    cols = ["name", "block", "mag", "d_bary", "i", "H_r", "colour", "comp"]
+    cols = ["name", "block", "mag", "d_bary", "H", "i", "H_r", "colour", "comp"]
     with path.open("w", newline="") as fh:
         for line in note.splitlines():
             fh.write(f"# {line}\n")

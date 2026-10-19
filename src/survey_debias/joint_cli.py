@@ -70,11 +70,11 @@ def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[d
         raw = detections_io.convert(char_root, name, cut, spec.get("detections") and
                                     root / spec["detections"])
         rows = [{"name": r["name"], "block": r["block"], "mag": float(r["mag"]),
-                 "d_bary": float(r["d_bary"]), "d_err": math.nan}
+                 "d_bary": float(r["d_bary"]), "d_err": math.nan, "h": float(r["Hsur"])}
                 for r in raw if r["comp"] == "cold"]
     elif fmt == "csv":
         cols = {"mag": "mag", "d_bary": "d_bary", "name": "name", "block": "block",
-                "d_bary_err": "d_bary_err", **spec.get("columns", {})}
+                "d_bary_err": "d_bary_err", "h": None, **spec.get("columns", {})}
         select = spec.get("select", {})
         rows = []
         for r in _read_csv(root / spec["detections"]):
@@ -85,9 +85,11 @@ def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[d
             if block is None:
                 raise ValueError(f"{name}: no block column and several blocks")
             err = r.get(cols["d_bary_err"], "")
+            h = r.get(cols["h"], "") if cols["h"] else ""
             rows.append({"name": r[cols["name"]], "block": block,
                          "mag": float(r[cols["mag"]]), "d_bary": float(r[cols["d_bary"]]),
-                         "d_err": float(err) if err not in ("", None) else math.nan})
+                         "d_err": float(err) if err not in ("", None) else math.nan,
+                         "h": float(h) if h not in ("", None) else math.nan})
     else:
         raise ValueError(f"{name}: format must be 'csv' or 'release', not {fmt!r}")
     excluded = set(spec.get("exclude_blocks", []))
@@ -135,7 +137,12 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
         filt = filt.pop()
         m = np.array([r["mag"] for r in rs])
         d = np.array([r["d_bary"] for r in rs])
-        h = np.array([apparent_to_Hr(mi, di, colour=0.0) for mi, di in zip(m, d)])
+        # H in the survey's filter: the catalogue's own H (release Hsur, or a CSV h
+        # column) where given. apparent_to_Hr assumes r = Delta = d, i.e. a phase
+        # angle of ~1/d rad, which is ~0.2 mag too faint near opposition.
+        h_cat = np.array([r["h"] for r in rs])
+        h = np.where(np.isfinite(h_cat), h_cat,
+                     [apparent_to_Hr(mi, di, colour=0.0) for mi, di in zip(m, d)])
         sample = hfit.HSample(
             names=np.array([r["name"] for r in rs]), h=h, m=m, bias=np.ones(len(rs)),
             rate=hfit.opposition_rate(d), h_column=f"H_{filt}", source=name,
@@ -156,6 +163,8 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
         term = SurveyTerm(name, filt, like, eps, colours.colour(filt, group))
         terms.append(term)
         info["surveys"][name] = {"filter": filt, "n": like.n, "colour": term.colour,
+                                 "h_source": "catalogue" if np.all(np.isfinite(h_cat))
+                                 else "apparent_to_Hr (r = Delta = d)",
                                  "h_range": [float(h.min()), float(h.max())],
                                  "blocks": sorted(blocks[name]), "eps": eps.meta}
     rank = {s: k for k, s in enumerate(priority)}
