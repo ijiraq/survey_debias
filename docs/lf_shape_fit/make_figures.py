@@ -46,8 +46,8 @@ COLOUR = -1.0
 # tanh, applied once (no cube). Kept to show where alpha = 0.05 came from.
 OLD_SPEC = "single:0.96,28.92,0.61,30.5"
 DIST_REL_ERR = 0.05
-# Profile grid in alpha; hfit's priors exclude the bound itself (0.05).
-PROFILE_ALPHAS = np.concatenate([[0.0501], np.round(np.arange(0.075, 0.901, 0.025), 3)])
+# Points in the plotted alpha profile (geometric over the prior, 0.05-2).
+PROFILE_POINTS = 61
 
 
 def style():
@@ -137,29 +137,6 @@ def local_slope(h, alpha, beta, h_b):
     return alpha + beta * 10.0 ** (-beta * (np.asarray(h, dtype=float) - h_b))
 
 
-def neg_loglike(like, priors):
-    def neg(theta):
-        v = hfit.log_posterior(theta, like, priors)
-        return -v if np.isfinite(v) else 1e300
-    return neg
-
-
-def profile_alpha(like, priors, alphas=PROFILE_ALPHAS):
-    """max over (beta, H_B) of ln L at fixed alpha, and where it is reached."""
-    h = like.sample.h
-    starts = [(b, hb) for b in (0.15, 0.4, 1.0, 1.9)
-              for hb in (h.min() - 0.2, *np.percentile(h, [25, 50, 75]), h.max())]
-    neg = neg_loglike(like, priors)
-    out, where = [], []
-    for a in alphas:
-        best = min((optimize.minimize(lambda x: neg((a, *x)), s, method="Nelder-Mead",
-                                      options={"xatol": 1e-4, "fatol": 1e-6})
-                    for s in starts), key=lambda r: r.fun)
-        out.append(-best.fun)
-        where.append((a, *best.x))
-    return np.array(out), np.array(where)
-
-
 def at_prior_edge(theta, priors) -> list[str]:
     out = []
     for name, v in zip(hfit.PARAM_NAMES, theta):
@@ -170,28 +147,18 @@ def at_prior_edge(theta, priors) -> list[str]:
 
 
 def fit_case(sample, selection, measurement, label):
-    """hfit.fit_mle, then a profile in alpha; keep the better maximum.
-
-    hfit.fit_mle starts from a fixed grid of (alpha, beta, H_B); with few
-    detections the tapered likelihood has separate ridges, and the profile
-    finds maxima the grid misses.
-    """
+    """hfit.fit_mle (grid starts plus the alpha-profile refit), and a finer
+    profile for plotting."""
     like, priors = build(sample, selection, measurement)
     mle = hfit.fit_mle(like, priors)
-    profile, where = profile_alpha(like, priors)
-    theta, loglike = np.asarray(mle.theta), mle.loglike
-    neg = neg_loglike(like, priors)
-    start = priors.clip(where[int(np.argmax(profile))])
-    res = optimize.minimize(neg, start, method="Nelder-Mead",
-                            options={"xatol": 1e-5, "fatol": 1e-7, "maxiter": 4000})
-    if -res.fun > loglike + 1e-6:
-        theta, loglike = np.asarray(res.x), -float(res.fun)
     lo, hi = alpha_exp_interval(like, mle.alpha_exp, mle.loglike_exp)
     return {
         "label": label, "like": like, "priors": priors, "mle": mle,
-        "theta": theta, "loglike": loglike, "grid_mle": np.asarray(mle.theta),
-        "grid_loglike": mle.loglike, "profile": profile,
-        "alpha_exp_lo": lo, "alpha_exp_hi": hi, "at_edge": at_prior_edge(theta, priors),
+        "theta": np.asarray(mle.theta), "loglike": mle.loglike,
+        "grid_mle": np.asarray(mle.grid_theta), "grid_loglike": mle.grid_loglike,
+        "profile": hfit.profile_alpha(like, priors, n_points=PROFILE_POINTS),
+        "alpha_exp_lo": lo, "alpha_exp_hi": hi,
+        "at_edge": at_prior_edge(mle.theta, priors),
     }
 
 
@@ -440,9 +407,10 @@ def fig_jwst_results(cases):
     for key, c in cases.items():
         col, ls = styles[key]
         prof = c["profile"]
-        ax.plot(PROFILE_ALPHAS, prof - np.max(prof), color=col, ls=ls, lw=2.0,
+        ax.plot(prof.alpha, prof.loglike - prof.loglike.max(), color=col, ls=ls, lw=2.0,
                 label=c["label"])
     ax.axhline(-0.5, color="0.6", ls=":", lw=1)
+    ax.set_xlim(0.0, 0.9)
     ax.set_xlabel(r"faint-end slope $\alpha$")
     ax.set_ylabel(r"profile $\ln L - \max\ln L$")
     ax.set_ylim(-6, 0.4)
@@ -538,8 +506,8 @@ def run_jwst(sample, selection, old):
         "shape-only MLE with survey_debias.hfit (docs demo).",
         "alpha is the faint-end slope (H >> H_B); the taper suppresses the bright end",
         "(H < H_B). Local slope d log10 N / dH = alpha + beta 10^(-beta (H - H_B)).",
-        "'grid' is hfit.fit_mle from its fixed starting grid; the main columns are the",
-        "better of that and a refit from the maximum of the profile in alpha.",
+        "hfit.fit_mle keeps the better of the maximum from its fixed starting grid",
+        "('grid' columns) and a refit from the peak of the profile in alpha.",
         "",
     ]
     for c in cases.values():
@@ -553,12 +521,13 @@ def run_jwst(sample, selection, old):
                      f"lnL={f.loglike_exp:.4f}")
     notes.append("")
     for c in cases.values():
-        rel = c["profile"] - c["profile"].max()
-        inside = PROFILE_ALPHAS[rel >= -0.5]
-        notes.append(f"profile {c['label']}: peak alpha={PROFILE_ALPHAS[np.argmax(rel)]:.3f}; "
-                     f"Delta lnL >= -0.5 for alpha {inside.min():.3f} to {inside.max():.3f}; "
+        prof = c["profile"]
+        rel = prof.loglike - prof.loglike.max()
+        lo, hi = prof.interval(0.5)
+        notes.append(f"profile {c['label']}: peak alpha={prof.peak[0]:.3f}; "
+                     f"Delta lnL >= -0.5 for alpha {lo:.3f} to {hi:.3f}; "
                      f"Delta lnL at 0.05 = {rel[0]:.2f}, "
-                     f"at 0.6 = {rel[PROFILE_ALPHAS == 0.6][0]:.2f}")
+                     f"at 0.6 = {np.interp(0.6, prof.alpha, rel):.2f}")
     (RES / "jwst_shape_notes.txt").write_text("\n".join(notes) + "\n")
     return cases
 

@@ -150,6 +150,20 @@ def run(args) -> int:
     groups = hfit.group_diagnostics(like, mle.theta)
     print(f"MLE: alpha={a:.4f} beta={b:.4f} H_B={hb:.3f} H_o={h_o_mle:.3f} "
           f"lnL={mle.loglike:.2f}", flush=True)
+    prof = mle.profile
+    a_lo, a_hi = prof.interval(0.5)
+    if mle.grid_loglike < mle.loglike - 0.1:
+        g = mle.grid_theta
+        notes.append(
+            f"MLE: the starting grid found a lower maximum (alpha={g[0]:.3f}, "
+            f"beta={g[1]:.3f}, H_B={g[2]:.2f}, ln L={mle.grid_loglike:.2f}) than the "
+            "refit from the alpha profile peak; the tapered likelihood has separate ridges"
+        )
+    if a_lo <= prof.alpha[0]:
+        notes.append(
+            f"alpha profile: ln L is within 0.5 of its peak at the prior bound "
+            f"alpha={priors.bounds['alpha'][0]:g}; the low side of alpha is set by the prior"
+        )
 
     summary = {
         "results": str(results),
@@ -165,6 +179,13 @@ def run(args) -> int:
         "priors": {k: list(v) for k, v in priors.bounds.items()},
         "mle": {"alpha": a, "beta": b, "h_b": hb, "h_o": h_o_mle,
                 "loglike": mle.loglike},
+        "alpha_profile": {
+            "alpha": prof.alpha.tolist(), "loglike": prof.loglike.tolist(),
+            "beta": prof.theta[:, 1].tolist(), "h_b": prof.theta[:, 2].tolist(),
+            "peak_alpha": float(prof.peak[0]), "within_0p5": [a_lo, a_hi],
+        },
+        "grid_mle": {"alpha": float(mle.grid_theta[0]), "beta": float(mle.grid_theta[1]),
+                     "h_b": float(mle.grid_theta[2]), "loglike": mle.grid_loglike},
         "exponential_mle": {"alpha": mle.alpha_exp, "loglike": mle.loglike_exp},
         "model_comparison": {
             "delta_loglike": d_lnl,
@@ -275,6 +296,10 @@ def _summary_text(s: dict, survey_name: str) -> str:
         f"  alpha = {m['alpha']:.4f}  beta = {m['beta']:.4f}  "
         f"H_B = {m['h_b']:.3f}  H_o = {m['h_o']:.3f}",
         f"  ln L = {m['loglike']:.2f}",
+        f"  profile in alpha (beta, H_B maximised): peak alpha = "
+        f"{s['alpha_profile']['peak_alpha']:.3f}; ln L within 0.5 of the peak for "
+        f"alpha {s['alpha_profile']['within_0p5'][0]:.3f} to "
+        f"{s['alpha_profile']['within_0p5'][1]:.3f}",
         "",
         "tapered versus single exponential N(<H) = 10^(alpha (H - H_o)):",
         f"  exponential alpha = {s['exponential_mle']['alpha']:.4f}  "

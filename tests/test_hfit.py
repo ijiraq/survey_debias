@@ -38,6 +38,8 @@ single_param=    0.95      25.00       0.30
 mag_lim= 26.50
 """
 
+NO_SCATTER = "mag_error= 0.0 0.0 21.0 0.0 40.0 0.0\nphot_frac= 1.0 0.0 0.0\n"
+
 TRUE = (0.6, 0.4, 7.0)
 DIST_MOD = (14.0, 14.6)   # m - H range of the synthetic geometries
 H_LO, H_HI = 4.0, 12.5
@@ -184,6 +186,65 @@ class Recovery(unittest.TestCase):
         sample.m[0] = 28.0
         with self.assertRaisesRegex(ValueError, "selection is zero"):
             hfit.ConditionalLikelihood(sample, selection, h_min=H_LO, measurement="none")
+
+
+# The 12 cold JWST Sample A objects (F150W2, d_bary) and a three-epoch
+# selection: the tapered likelihood has two ridges, and the starting grid
+# alone stops on the lower one (alpha at its prior bound).
+COLD_M = np.array([24.47, 25.89, 25.98, 26.70, 26.94, 27.28, 27.34, 27.49, 27.79,
+                   28.19, 28.58, 28.60])
+COLD_D = np.array([46.20, 43.21, 44.83, 41.07, 45.13, 42.75, 45.14, 42.80, 43.27,
+                   50.69, 42.28, 47.77])
+
+
+def two_ridge_like():
+    from survey_debias.grid_bias import apparent_to_Hr
+
+    h = np.array([apparent_to_Hr(m, d, colour=-1.0) for m, d in zip(COLD_M, COLD_D)])
+    epoch = hfit.parse_efficiency_spec("single:0.96,28.92,0.61,30.5")
+    sample = hfit.HSample(np.array([f"c{i}" for i in range(len(h))]), h, COLD_M,
+                          np.ones(len(h)), hfit.opposition_rate(COLD_D), "Hx", "x",
+                          d=COLD_D)
+    h_min = float(h.min()) - 1.0
+    like = hfit.ConditionalLikelihood(sample, hfit.SurveySelection([epoch] * 3), h_min,
+                                      measurement="none")
+    return like, hfit.default_priors(h, h_min)
+
+
+@unittest.skipUnless(HAVE_SCIPY, "scipy not installed")
+class ProfileMLE(unittest.TestCase):
+    def test_mle_takes_the_higher_ridge(self):
+        like, priors = two_ridge_like()
+        mle = hfit.fit_mle(like, priors)
+        self.assertAlmostEqual(mle.grid_theta[0], priors.bounds["alpha"][0], delta=1e-3)
+        self.assertGreater(mle.loglike, mle.grid_loglike + 0.3)
+        self.assertAlmostEqual(mle.theta[0], 0.27, delta=0.03)
+        self.assertGreaterEqual(mle.loglike, mle.profile.loglike.max() - 1e-6)
+        lo, hi = mle.profile.interval(0.5)
+        self.assertEqual(lo, mle.profile.alpha[0])
+        self.assertGreater(hi, mle.theta[0])
+        self.assertLess(hi, 0.5)
+
+    def test_profile_spans_the_alpha_prior(self):
+        like, priors = two_ridge_like()
+        prof = hfit.profile_alpha(like, priors, n_points=9)
+        lo, hi = priors.bounds["alpha"]
+        self.assertEqual(prof.theta.shape, (9, 3))
+        self.assertTrue(np.all((prof.alpha > lo) & (prof.alpha < hi)))
+        for theta, ll in zip(prof.theta, prof.loglike):
+            self.assertAlmostEqual(like.loglike(*theta), ll)
+
+    def test_warm_start_skips_the_profile(self):
+        like, priors = two_ridge_like()
+        mle = hfit.fit_mle(like, priors, start=(0.3, 1.0, 9.0), exponential=False)
+        self.assertIsNone(mle.profile)
+
+    def test_impossible_detections_are_an_error(self):
+        # Noiseless detections near the limit cannot come from OSSSSim's
+        # default mag_error, whose faint-end offset measures objects brighter.
+        sample, selection = synthetic(400, seed=5)
+        with self.assertRaisesRegex(ValueError, "cannot be produced"):
+            hfit.ConditionalLikelihood(sample, selection, h_min=H_LO, measurement="model")
 
 
 SURVEY_TOML = """\
@@ -435,7 +496,9 @@ class Command(unittest.TestCase):
         sample, _selection = synthetic(400, seed=5)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            write_characterization(root)
+            # synthetic() draws without scatter; say so, or the CLI applies
+            # OSSSSim's default mag_error.
+            write_characterization(root, blocks=(("t", EFF_TEXT + NO_SCATTER),))
             (root / "s.toml").write_text(SURVEY_TOML)
             lines = ["# detection columns: test", "# bias_mode: union",
                      "name,mag,dist,incl,survey,block,colour_group,cell,Hx,bias,bias_se"]
@@ -461,6 +524,8 @@ class Command(unittest.TestCase):
             summary = json.loads((out_dir / "hfit_summary.json").read_text())
             self.assertEqual(summary["n_detections"], 400)
             self.assertIn("posterior", summary)
+            self.assertGreaterEqual(summary["mle"]["loglike"],
+                                    max(summary["alpha_profile"]["loglike"]) - 1e-6)
             self.assertEqual(summary["bootstrap"]["replicates"], 8)
             self.assertEqual([g["group"] for g in summary["groups"]], ["T/t"])
             self.assertGreater(summary["normalisation"]["ht_sigma_bias"], 0.0)

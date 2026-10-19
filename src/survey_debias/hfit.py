@@ -76,6 +76,8 @@ PARAM_LABELS = {
     "h_o": r"$H_o$",
 }
 DEFAULT_PRIORS = {"alpha": (0.05, 2.0), "beta": (0.02, 2.0)}
+# Points in the profile likelihood over the alpha prior that fit_mle refits from.
+PROFILE_POINTS = 25
 MEASUREMENT_MODES = ("model", "none")
 # Scatter below this many H cells is raised to it (the kernel must be resolved).
 SIGMA_FLOOR_CELLS = 2
@@ -614,6 +616,16 @@ class ConditionalLikelihood:
         if h_max is not None:
             self.den[:, self.grid > h_max] = 0.0
             self.num[:, self.grid > h_max] = 0.0
+        reached = np.zeros(n, dtype=bool)
+        np.logical_or.at(reached, det, self.point | (self.num.max(axis=1) > 0.0))
+        if not reached.all():
+            names = ", ".join(s.names[~reached][:5])
+            raise ValueError(
+                f"{int((~reached).sum())} detections cannot be produced by any detectable "
+                f"true magnitude under the photometric model, e.g. {names}. Check the "
+                "block's mag_error= line (OSSSSim defaults, with a faint-end offset, "
+                "apply when it is missing)."
+            )
         self._pit_cache = None
 
     # -- construction helpers ------------------------------------------------
@@ -981,28 +993,117 @@ def log_posterior(theta, like: ConditionalLikelihood, priors: Priors) -> float:
 
 
 @dataclass
+class AlphaProfile:
+    """max over (beta, h_b) of ln L at each alpha, and where it is reached."""
+
+    alpha: np.ndarray
+    loglike: np.ndarray
+    theta: np.ndarray         # (n, 3)
+
+    @property
+    def peak(self) -> np.ndarray:
+        return self.theta[int(np.argmax(self.loglike))]
+
+    def interval(self, drop: float = 0.5) -> tuple[float, float]:
+        """alpha range with ln L within ``drop`` of the peak (interpolated).
+
+        An end that reaches the edge of the grid (the prior) is returned as
+        that edge.
+        """
+        rel = self.loglike - np.max(self.loglike) + drop
+        inside = np.flatnonzero(rel >= 0.0)
+        i, j = int(inside.min()), int(inside.max())
+
+        def cross(a, b):
+            return float(np.interp(0.0, [rel[a], rel[b]], [self.alpha[a], self.alpha[b]]))
+
+        lo = self.alpha[0] if i == 0 else cross(i - 1, i)
+        hi = self.alpha[-1] if j == len(rel) - 1 else cross(j + 1, j)
+        return float(lo), float(hi)
+
+
+@dataclass
 class MLEResult:
     theta: np.ndarray
     loglike: float
     alpha_exp: float
     loglike_exp: float
+    profile: AlphaProfile | None = None
+    grid_theta: np.ndarray | None = None     # best maximum from the starting grid
+    grid_loglike: float = float("nan")
 
 
-def fit_mle(like: ConditionalLikelihood, priors: Priors, start=None,
-            exponential: bool = True) -> MLEResult:
-    """Tapered (and single-exponential) MLE.
-
-    ``start`` warm-starts one Nelder-Mead run there instead of a grid of
-    starting points (used by the bootstrap).
-    """
-    from scipy import optimize
-
+def _neg_log_posterior(like, priors):
     def neg(theta):
         v = log_posterior(theta, like, priors)
         return 1e300 if not np.isfinite(v) else -v
+    return neg
 
+
+def _nelder_mead(fun, start, xatol=1e-5, fatol=1e-7, maxiter=4000):
+    from scipy import optimize
+
+    return optimize.minimize(fun, start, method="Nelder-Mead",
+                             options={"xatol": xatol, "fatol": fatol, "maxiter": maxiter})
+
+
+def profile_alpha(like: ConditionalLikelihood, priors: Priors,
+                  n_points: int = PROFILE_POINTS) -> AlphaProfile:
+    """Profile likelihood in alpha on a geometric grid inside its prior.
+
+    Sweeping up in alpha, (beta, h_b) are maximised from the previous
+    alpha's optimum and from the best of a few fixed starts that put the
+    taper at either end and the middle of the detections' H range, so
+    ridges with the taper on either side of the data are found. A sweep
+    back down from warm starts keeps whichever is higher at each alpha.
+    Each point is located to ~1e-3 in (beta, h_b); fit_mle polishes the peak.
+    """
+    lo, hi = priors.bounds["alpha"]
+    span = hi - lo
+    alphas = np.geomspace(lo + 1e-4 * span, hi - 1e-4 * span, n_points)
+    neg = _neg_log_posterior(like, priors)
+    h = like.sample.h
+    beta_hi = priors.bounds["beta"][1]
+    fixed = [(b, hb) for b in (0.3, 0.95 * beta_hi)
+             for hb in (h.min(), np.median(h), h.max())]
+    loglike = np.full(n_points, -np.inf)
+    theta = np.zeros((n_points, 3))
+
+    def improve(i, starts):
+        a = alphas[i]
+        for s in starts:
+            res = _nelder_mead(lambda x: neg((a, *x)), priors.clip((a, *s))[1:],
+                               xatol=1e-3, fatol=1e-4, maxiter=400)
+            if -res.fun > loglike[i]:
+                loglike[i] = -float(res.fun)
+                theta[i] = (a, *res.x)
+
+    for i, a in enumerate(alphas):
+        screened = min(fixed, key=lambda s: neg(priors.clip((a, *s))))
+        improve(i, [screened] + ([tuple(theta[i - 1, 1:])] if i else []))
+    for i in range(n_points - 2, -1, -1):
+        improve(i, [tuple(theta[i + 1, 1:])])
+    return AlphaProfile(alphas, loglike, theta)
+
+
+def fit_mle(like: ConditionalLikelihood, priors: Priors, start=None,
+            exponential: bool = True, profile: bool = True) -> MLEResult:
+    """Tapered (and single-exponential) MLE.
+
+    Nelder-Mead runs from a grid of starting points; with ``profile`` the
+    likelihood is also profiled in alpha and refitted from the profile peak,
+    and the higher maximum is kept. With few detections the tapered
+    likelihood can have separate ridges (taper brightward or faintward of
+    the data) that the starting grid alone does not reach. ``start``
+    warm-starts one run there instead and skips the profile (used by the
+    bootstrap).
+    """
+    from scipy import optimize
+
+    neg = _neg_log_posterior(like, priors)
     if start is not None:
         scored = [priors.clip(start)]
+        profile = False
     else:
         h = like.sample.h
         starts = []
@@ -1012,22 +1113,30 @@ def fit_mle(like: ConditionalLikelihood, priors: Priors, start=None,
                     starts.append(priors.clip((alpha, beta, h_b)))
         scored = sorted(starts, key=neg)[:6]
     best = None
-    for start in scored:
-        res = optimize.minimize(neg, start, method="Nelder-Mead",
-                                options={"xatol": 1e-5, "fatol": 1e-7,
-                                         "maxiter": 4000})
+    for s in scored:
+        res = _nelder_mead(neg, s)
         if best is None or res.fun < best.fun:
             best = res
-    if not exponential:
-        return MLEResult(np.asarray(best.x), -float(best.fun), float("nan"), float("nan"))
-    exp_res = optimize.minimize_scalar(
-        lambda a: -like.loglike_exponential(a), bounds=(1e-3, 3.0),
-        method="bounded",
-    )
-    return MLEResult(
-        theta=np.asarray(best.x), loglike=-float(best.fun),
-        alpha_exp=float(exp_res.x), loglike_exp=-float(exp_res.fun),
-    )
+    if best.fun >= 1e300:
+        if start is not None:
+            return MLEResult(np.asarray(best.x), -np.inf, float("nan"), float("nan"))
+        raise ValueError("fit_mle: ln L is not finite at any starting point")
+    grid_theta, grid_loglike = np.asarray(best.x), -float(best.fun)
+    prof = None
+    if profile:
+        prof = profile_alpha(like, priors)
+        res = _nelder_mead(neg, priors.clip(prof.peak))
+        if res.fun < best.fun:
+            best = res
+    out = MLEResult(np.asarray(best.x), -float(best.fun), float("nan"), float("nan"),
+                    prof, grid_theta, grid_loglike)
+    if exponential:
+        exp_res = optimize.minimize_scalar(
+            lambda a: -like.loglike_exponential(a), bounds=(1e-3, 3.0),
+            method="bounded",
+        )
+        out.alpha_exp, out.loglike_exp = float(exp_res.x), -float(exp_res.fun)
+    return out
 
 
 @dataclass
@@ -1049,10 +1158,14 @@ def run_mcmc(like, priors, start, n_walkers=32, n_steps=4000, burn=1000,
     ndim = len(PARAM_NAMES)
     scale = np.array([0.02, 0.02, 0.1])
     p0 = []
-    while len(p0) < n_walkers:
+    for _ in range(1000 * n_walkers):
+        if len(p0) == n_walkers:
+            break
         trial = start + scale * rng.standard_normal(ndim)
         if np.isfinite(log_posterior(trial, like, priors)):
             p0.append(trial)
+    else:
+        raise ValueError(f"run_mcmc: ln L is not finite near the start {np.round(start, 4)}")
     sampler = emcee.EnsembleSampler(
         n_walkers, ndim, log_posterior, args=(like, priors),
     )
@@ -1323,10 +1436,10 @@ def warn_if_short(mcmc: MCMCResult) -> list[str]:
 
 
 __all__ = [
-    "BiasTable", "BootstrapResult", "ConditionalLikelihood", "EpochSelection",
-    "HSample", "HTCount", "MCMCResult", "MLEResult", "PARAM_NAMES", "Priors",
-    "SurveySelection", "bias_table", "block_selections", "bootstrap",
+    "AlphaProfile", "BiasTable", "BootstrapResult", "ConditionalLikelihood",
+    "EpochSelection", "HSample", "HTCount", "MCMCResult", "MLEResult", "PARAM_NAMES",
+    "Priors", "SurveySelection", "bias_table", "block_selections", "bootstrap",
     "cumulative", "default_priors", "fit_mle", "group_diagnostics", "h_o_for",
     "ht_count", "load_hsample", "log_cumulative", "log_differential",
-    "parse_efficiency_spec", "read_efficiency_file", "run_mcmc",
+    "parse_efficiency_spec", "profile_alpha", "read_efficiency_file", "run_mcmc",
 ]

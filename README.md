@@ -543,8 +543,12 @@ brighter than the brightest detection, $\beta$ and $H_B$ are set by their
 priors, and if $H_B$ is fainter than every detection, $\alpha$ describes
 magnitudes with no data and drifts to its bound. The summary flags the
 first case. With few detections the likelihood can have both solutions as
-separate maxima; the MLE starts from a fixed grid and can stop on the lower
-one, so read the MCMC posterior.
+separate maxima, which a local optimiser started from a fixed grid can miss.
+The MLE therefore also profiles $\ln L$ in $\alpha$ (maximising over $\beta$
+and $H_B$ at 25 values of $\alpha$ across its prior), refits from the
+profile peak, and keeps the higher maximum. The summary gives the profile's
+peak and the range of $\alpha$ within $\Delta\ln L = 0.5$ of it, and notes
+when the grid found a lower maximum or the range reaches the prior bound.
 
 ### Options
 
@@ -568,7 +572,8 @@ one, so read the MCMC posterior.
 ### Fit outputs
 
 - `hfit_summary.txt`, `hfit_summary.json`: maximum-likelihood parameters
-  and $\ln L$; posterior medians with 68% intervals; bootstrap medians and
+  and $\ln L$; the profile likelihood in $\alpha$ (the JSON has every point);
+  posterior medians with 68% intervals; bootstrap medians and
   intervals; comparison with a single exponential
   $N(<H) = 10^{\alpha(H-H_o)}$ ($\Delta\ln L$, ΔAIC, ΔBIC, and an
   approximate likelihood-ratio p-value); goodness of fit, overall and per

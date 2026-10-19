@@ -486,11 +486,15 @@ $\sum 1/P$ is a known constant.
 With few detections the tapered likelihood can have separate maxima: one with
 $H_B$ just brightward of the brightest object (the taper as a sharp bright-end
 cut-off) and one with $H_B$ faintward of the faintest (a slope that flattens
-across the data, with $\alpha$ at its bound).  The MLE in \texttt{hfit} starts
-from a fixed grid of $(\alpha,\beta,H_B)$ and can stop on the lower one; for
-the Sample~A cold objects it does.  Read the MCMC posterior, or a profile
-likelihood in $\alpha$ as in Section~\ref{sec:results}, rather than the MLE
-alone.
+across the data, with $\alpha$ at its bound).  A local optimiser started
+from a fixed grid of $(\alpha,\beta,H_B)$ can stop on the lower one; for the
+Sample~A cold objects it does.  \texttt{hfit.fit\_mle} therefore also
+profiles $\ln L$ in $\alpha$ (maximising over $\beta$ and $H_B$ at 25 values
+of $\alpha$ across its prior), refits all three parameters from the profile
+peak, and keeps the higher maximum.  The fit summary reports the profile, the
+range of $\alpha$ within $\Delta\ln L=0.5$ of its peak, and the grid maximum
+when it is lower.  Bootstrap refits start from the full-sample MLE and skip
+the profile.
 
 \paragraph{Calibration checks.}
 Probability-integral transforms (PITs) of the observed magnitudes under the
@@ -550,7 +554,7 @@ the old selection for comparison:
 \begin{table}[t]
   \centering
   \caption{Shape-only fits to the twelve cold Sample~A objects.  Left: the
-  tapered maximum likelihood, refined from the profile in $\alpha$ (a dagger
+  tapered maximum likelihood from \texttt{hfit.fit\_mle} (a dagger
   marks a parameter at its prior bound, $\alpha\ge0.05$, $\beta\le2$).
   Right: the single exponential, with its 68\% interval
   ($\Delta\ln L=-0.5$).}
@@ -561,8 +565,8 @@ the old selection for comparison:
     treatment & $\alpha$ & $\beta$ & $H_B$ & $\ln\mathcal{L}$ & $\alpha$ & $\ln\mathcal{L}$ \\
     \midrule
     no measurement error      & $0.266$ & $2.00^\dagger$ & $8.56$  & $-17.28$ & $0.24^{+0.10}_{-0.09}$ & $-17.91$ \\
-    photometric model         & $0.267$ & $2.00^\dagger$ & $8.56$  & $-17.31$ & $0.24^{+0.10}_{-0.09}$ & $-17.93$ \\
-    photometry + 5\% distance & $0.268$ & $2.00^\dagger$ & $8.47$  & $-17.55$ & $0.24^{+0.10}_{-0.09}$ & $-17.93$ \\
+    photometric model         & $0.266$ & $2.00^\dagger$ & $8.56$  & $-17.31$ & $0.24^{+0.10}_{-0.09}$ & $-17.93$ \\
+    photometry + 5\% distance & $0.270$ & $2.00^\dagger$ & $8.46$  & $-17.55$ & $0.24^{+0.10}_{-0.09}$ & $-17.93$ \\
     old single-epoch $S$      & $0.05^\dagger$ & $0.21$  & $11.35$ & $-18.49$ & $0.16^{+0.08}_{-0.08}$ & $-19.35$ \\
     \bottomrule
   \end{tabular}
@@ -630,8 +634,9 @@ every detection), lies only 0.42 below the maximum (0.18 with distance error).
 On that ridge $\alpha$ describes $H>13.8$, where there are no detections;
 across the data the local slope falls from 0.6 to 0.2.  An MLE at
 $\alpha=0.05$ is then a statement that the faint end is beyond the data, not
-that the population is flat.  \texttt{hfit}'s grid-started MLE lands on this
-ridge for these data (Section~\ref{sec:practice}).
+that the population is flat.  A grid-started local optimiser lands on this
+ridge for these data, which is why \texttt{hfit.fit\_mle} also refits from
+the profile peak (Section~\ref{sec:practice}).
 
 \paragraph{Measurement error.}
 At Sample~A's precision ($\sigma\approx0.06$~mag at $m=28.6$ for the
