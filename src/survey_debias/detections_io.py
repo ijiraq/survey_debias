@@ -158,6 +158,38 @@ def convert(char_root, survey: str, cut: ColdCut, path=None) -> list[dict]:
     return out
 
 
+def read_duplicates(path) -> list[tuple[str, ...]]:
+    """Groups of designations of one object (one group per line, ``#`` comments)."""
+    groups = []
+    for raw in Path(path).read_text().splitlines():
+        words = raw.split("#", 1)[0].split()
+        if len(words) >= 2:
+            groups.append(tuple(words))
+    return groups
+
+
+def drop_duplicates(names: dict, groups, priority) -> dict:
+    """Designations to drop per survey, so each object is counted once.
+
+    ``names`` maps survey -> designations in its sample; an object found by
+    several surveys is kept in the first of ``priority`` that has it.
+    """
+    order = {s: k for k, s in enumerate(priority)}
+    where = {}
+    for survey, members in names.items():
+        for n in members:
+            where.setdefault(n, []).append(survey)
+    drop = {s: set() for s in names}
+    for group in groups:
+        found = [(order.get(s, len(order)), s, n) for n in group for s in where.get(n, [])]
+        if len(found) < 2:
+            continue
+        found.sort()
+        for _, s, n in found[1:]:
+            drop[s].add(n)
+    return drop
+
+
 def write_csv(rows: list[dict], path, note: str = "") -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

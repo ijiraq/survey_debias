@@ -81,6 +81,17 @@ class Reader(unittest.TestCase):
         self.assertFalse(cut({"cl": "cla", "p": "m", "sh": "I", "i": 1.0}))
         self.assertFalse(cut({"cl": "cla", "p": "m", "sh": "S", "i": 5.0}))
 
+    def test_duplicates_are_kept_in_the_priority_survey(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Duplicates"
+            path.write_text("# OSSOS  CFEPS\no3e20PD   L4h05PD\no3l13PD L3s05\n")
+            groups = detections_io.read_duplicates(path)
+        names = {"OSSOS_v11": ["o3e20PD", "o5x"], "CFEPS_g": ["L4h05PD", "L3s05"]}
+        drop = detections_io.drop_duplicates(names, groups, ["OSSOS_v11", "CFEPS_g"])
+        self.assertEqual(drop, {"OSSOS_v11": set(), "CFEPS_g": {"L4h05PD"}})
+        drop = detections_io.drop_duplicates(names, groups, ["CFEPS_g", "OSSOS_v11"])
+        self.assertEqual(drop, {"OSSOS_v11": {"o3e20PD"}, "CFEPS_g": set()})
+
     def test_command_writes_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             write_survey(Path(tmp))
