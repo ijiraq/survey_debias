@@ -149,6 +149,15 @@ class GridBiasHelpers(unittest.TestCase):
             0.0,
         )
 
+    def test_geometric_probability_covers_the_sky_once(self):
+        # Summed over 1 deg^2 cells of the band |beta| < i (360 cells per
+        # degree of latitude, scaled by cos beta) the fractions add to one.
+        inc = 6.0
+        betas = np.linspace(-inc, inc, 200001)[1:-1]
+        dens = np.array([grid_bias.geometric_detection_prob(1.0, inc, b) for b in betas])
+        total = np.trapezoid(360.0 * np.cos(np.radians(betas)) * dens, betas)
+        self.assertAlmostEqual(total, 1.0, places=2)
+
     def test_aimed_at_field_reaches_jwst_latitude(self):
         inc, node, peri, M = grid_bias.aimed_at_field(survey=FIELD)
         lon, lat = grid_bias.icrs_to_ecliptic(

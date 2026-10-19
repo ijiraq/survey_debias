@@ -329,12 +329,17 @@ def apparent_to_Hr(m_survey: float, d_au: float, robs_au: float = 1.0,
 def geometric_detection_prob(area_deg2: float, inc_deg: float, beta_deg: float) -> float:
     """Single-epoch geometric probability for a small field.
 
-    P ≈ A / (360° × 2 × sqrt(i² − β²)) when i > |β|. For a 0.05 deg² mosaic
-    near the ecliptic and a ~7° inclination belt this is ~1e-5.
+    The fraction of orbits of inclination i (uniform node and argument of
+    latitude) inside a field of A deg² at ecliptic latitude β:
+    P = A / (360 × 180 × sqrt(sin² i − sin² β)) when i > |β|, which is
+    A / (360 π sqrt(i² − β²)) for small angles (i, β in degrees). For a
+    0.05 deg² mosaic near the ecliptic and a ~7° inclination belt this is ~6e-6.
     """
     if abs(inc_deg) <= abs(beta_deg):
         return 0.0
-    return area_deg2 / (360.0 * 2.0 * math.sqrt(inc_deg ** 2 - beta_deg ** 2))
+    si = math.sin(math.radians(inc_deg))
+    sb = math.sin(math.radians(beta_deg))
+    return area_deg2 / (360.0 * 180.0 * math.sqrt(si * si - sb * sb))
 
 
 def geometric_prob_for_aimed(a: float, e: float, inc_deg: float, node_deg: float,
