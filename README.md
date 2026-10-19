@@ -601,3 +601,10 @@ The tests do not need the compiled simulator for most checks (the bias
 loop is tested with a stub simulator); a few cross-check footprint areas
 against `ossssim` when it is installed. Tests that need survey files not
 in this repository are skipped.
+
+## Luminosity-function shape fit (documentation)
+
+A project note on the conditional LF *shape* likelihood — with and without
+photometric and distance measurement error — lives in
+[`docs/lf_shape_fit/`](docs/lf_shape_fit/). Build instructions and a JWST
+Sample A demo are in that directory's README.
