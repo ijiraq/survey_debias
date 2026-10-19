@@ -326,6 +326,27 @@ def apparent_to_Hr(m_survey: float, d_au: float, robs_au: float = 1.0,
             + bowell_phase_correction(alpha, g))
 
 
+def geometric_h(m_survey: float, d_au: float, ra_deg: float, dec_deg: float, obs_icrf,
+                g: float = BOWELL_G, colour: float = 0.0) -> float:
+    """H from the observed geometry: distance d along (ra, dec) from the observer.
+
+    Solves |O + Delta u| = d for Delta (O the barycentric observer, u the
+    direction), then H = m - colour - 5 log10(d Delta) + Bowell(alpha) with the
+    true phase angle. Unlike :func:`apparent_to_Hr` (r = Delta = d, i.e. a
+    phase angle of ~1/d rad) this is right near opposition.
+    """
+    ra, dec = math.radians(ra_deg), math.radians(dec_deg)
+    u = (math.cos(dec) * math.cos(ra), math.cos(dec) * math.sin(ra), math.sin(dec))
+    o = tuple(float(x) for x in obs_icrf)
+    ou = sum(a * b for a, b in zip(o, u))
+    oo = sum(a * a for a in o)
+    delta = -ou + math.sqrt(max(ou * ou - oo + d_au * d_au, 0.0))
+    cos_a = (d_au * d_au + delta * delta - oo) / (2.0 * d_au * delta)
+    alpha = math.acos(max(-1.0, min(1.0, cos_a)))
+    return (m_survey - colour - 5.0 * math.log10(d_au * delta)
+            + bowell_phase_correction(alpha, g))
+
+
 def geometric_detection_prob(area_deg2: float, inc_deg: float, beta_deg: float) -> float:
     """Single-epoch geometric probability for a small field.
 

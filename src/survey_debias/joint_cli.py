@@ -40,9 +40,9 @@ import numpy as np
 
 from . import __version__, detections_io, hfit
 from .colours import ColourMap, load_colours
-from .grid_bias import apparent_to_Hr
+from .grid_bias import geometric_h
 from .joint import SIGMA_C, SIGMA_DELTA, JointLikelihood, SurveyTerm, fit_joint, run_mcmc
-from .pointings import load_survey_blocks
+from .pointings import load_survey_blocks, observer_icrf
 from .survey_efficiency import EfficiencyTable
 
 
@@ -96,6 +96,13 @@ def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[d
     return [r for r in rows if r["block"] not in excluded]
 
 
+def _pointing_h(row: dict, block) -> float:
+    """H in the block's filter from its first pointing's direction, epoch and observer."""
+    tile = block.tiles[0][0]
+    obs = observer_icrf(block.char_dirs[0], tile.observer, tile.jd)
+    return geometric_h(row["mag"], row["d_bary"], tile.ra_deg, tile.dec_deg, obs)
+
+
 def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
                 ) -> tuple[JointLikelihood, dict]:
     j = cfg["joint"]
@@ -138,11 +145,11 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
         m = np.array([r["mag"] for r in rs])
         d = np.array([r["d_bary"] for r in rs])
         # H in the survey's filter: the catalogue's own H (release Hsur, or a CSV h
-        # column) where given. apparent_to_Hr assumes r = Delta = d, i.e. a phase
-        # angle of ~1/d rad, which is ~0.2 mag too faint near opposition.
+        # column) where given, else from the block's pointing and observer. Not
+        # apparent_to_Hr: r = Delta = d (phase ~1/d rad) is ~0.2 mag off near opposition.
         h_cat = np.array([r["h"] for r in rs])
-        h = np.where(np.isfinite(h_cat), h_cat,
-                     [apparent_to_Hr(mi, di, colour=0.0) for mi, di in zip(m, d)])
+        h = np.array([hc if np.isfinite(hc) else _pointing_h(r, blocks[name][r["block"]])
+                      for hc, r in zip(h_cat, rs)])
         sample = hfit.HSample(
             names=np.array([r["name"] for r in rs]), h=h, m=m, bias=np.ones(len(rs)),
             rate=hfit.opposition_rate(d), h_column=f"H_{filt}", source=name,
@@ -164,7 +171,7 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
         terms.append(term)
         info["surveys"][name] = {"filter": filt, "n": like.n, "colour": term.colour,
                                  "h_source": "catalogue" if np.all(np.isfinite(h_cat))
-                                 else "apparent_to_Hr (r = Delta = d)",
+                                 else "geometric (block pointing and observer)",
                                  "h_range": [float(h.min()), float(h.max())],
                                  "blocks": sorted(blocks[name]), "eps": eps.meta}
     rank = {s: k for k, s in enumerate(priority)}

@@ -149,6 +149,13 @@ class GridBiasHelpers(unittest.TestCase):
             0.0,
         )
 
+    def test_geometric_h_at_opposition(self):
+        # Observer 1 au from the Sun, object straight out at 44 au: Delta = 43, phase 0.
+        h = grid_bias.geometric_h(24.0, 44.0, 0.0, 0.0, (1.0, 0.0, 0.0))
+        self.assertAlmostEqual(h, 24.0 - 5.0 * math.log10(44.0 * 43.0), places=6)
+        # r = Delta = d puts the phase angle at ~1/d rad, ~0.2 mag fainter here.
+        self.assertGreater(h - grid_bias.apparent_to_Hr(24.0, 44.0), 0.15)
+
     def test_geometric_probability_covers_the_sky_once(self):
         # Summed over 1 deg^2 cells of the band |beta| < i (360 cells per
         # degree of latitude, scaled by cos beta) the fractions add to one.
