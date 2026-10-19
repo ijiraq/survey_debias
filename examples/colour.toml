@@ -25,17 +25,20 @@
 # t = HST ACS F606W STMAG (not r, not w): STMAG = r_AB + 0.3
 "t-g" = -0.4
 
+# Dynamically cold objects are redder: g - r = 0.9 (OSSOS 1.0 model; the
+# [default] 0.7 is a hot + cold mix). Every other band keeps its colour
+# relative to r.
 [cold]
 "g-g" = 0.0
-"r-g" = -0.7
-"i-g" = -1.2
-"z-g" = -1.7
-"u-g" = 0.3
-"V-g" = 0.5
-"B-g" = 0.1
-"R-g" = -0.8
-"I-g" = -1.2
-"w-g" = -0.8
-"J-g" = -1.5
-"H-g" = -1.7
-"t-g" = -0.4
+"r-g" = -0.9
+"i-g" = -1.4
+"z-g" = -1.9
+"u-g" = 0.1
+"V-g" = 0.3
+"B-g" = -0.1
+"R-g" = -1.0
+"I-g" = -1.4
+"w-g" = -1.0
+"J-g" = -1.7
+"H-g" = -1.9
+"t-g" = -0.6
