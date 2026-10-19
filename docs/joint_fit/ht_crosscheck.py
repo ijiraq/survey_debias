@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Horvitz-Thompson cross-check of the joint fit's normalisation.
 
-Each detection's bias is P(detect | its r, i, H) for the cold model, from
-the survey's plant table: plants within +/- DR au and +/- DI deg of the
-detection, weighted by w S_bar(H_f + mu) (the corrected geometric
-probability and the block's selection). sum 1/bias over a survey's
-detections brighter than H_lim estimates the whole cold population there,
-which the joint fit's N(<H_lim) should match.
+Each detection's bias is P(detect by any block of its survey | its r, i, H)
+for the cold model, from the survey's plant table: plants within +/- DR au
+and +/- DI deg of the detection, weighted by w S_bar(H_f + mu) (the
+corrected geometric probability and each block's selection), summed over
+blocks. sum 1/bias over a survey's detections brighter than H_lim estimates
+the cold population with i < 5 deg there (about 0.76 of all cold objects in
+the OSSOS 1.0 model), to compare with the joint fit's N(<H_lim).
 
     python docs/joint_fit/ht_crosscheck.py <joint.toml> <joint_summary.json>
 """
@@ -55,9 +56,11 @@ def main(config, summary_path):
         for k in range(len(s)):
             if h_r[k] > h_lim:
                 continue
-            group = str(s.group[k])
-            b = detection_bias(plants, term.like.selections[group], group.split("/", 1)[1],
-                               float(s.d[k]), incs[str(s.names[k])], float(s.h[k]))
+            # Union over the survey's blocks: each block alone would estimate the
+            # whole population again.
+            b = sum(np.nan_to_num(detection_bias(plants, sel, g.split("/", 1)[1], float(s.d[k]),
+                                                 incs[str(s.names[k])], float(s.h[k])))
+                    for g, sel in term.like.selections.items())
             if not b > 0:
                 missing += 1
                 continue
