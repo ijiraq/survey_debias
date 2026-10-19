@@ -1,4 +1,5 @@
-label,alpha,beta,h_b,loglike
-"no measurement error",0.0500,0.2513,11.2490,-29.6951
-"photometric model from .eff",0.0500,0.2487,11.2753,-29.6942
-"photometry + 5% distance error",0.0500,0.2557,11.2420,-29.6807
+label,alpha,beta,h_b,loglike,params_at_prior_edge,grid_alpha,grid_beta,grid_h_b,grid_loglike,alpha_exp,alpha_exp_lo,alpha_exp_hi,loglike_exp
+"no measurement error",0.2662,2.0000,8.5584,-17.2786,"beta",0.0500,0.1236,13.7534,-17.7029,0.2393,0.1461,0.3405,-17.9061
+"photometric model from .eff",0.2665,2.0000,8.5584,-17.3061,"beta",0.0500,0.1235,13.7610,-17.7309,0.2394,0.1462,0.3407,-17.9329
+"photometry + 5% distance error",0.2681,2.0000,8.4736,-17.5476,"beta",0.0500,0.1240,13.7417,-17.7321,0.2391,0.1458,0.3404,-17.9276
+"old single-epoch tanh selection",0.0500,0.2115,11.3545,-18.4889,"alpha",0.0500,0.2115,11.3545,-18.4889,0.1566,0.0778,0.2395,-19.3480

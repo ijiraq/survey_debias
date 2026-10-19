@@ -1,3 +1,5 @@
-truth: (0.7, 0.35, 8.0)
-none:  [0.09697269 2.         2.        ]  logL=-1937.196
-model: [0.09723692 2.         2.        ]  logL=-1935.090
+truth (alpha, beta, H_B): (0.5, 0.4, 11.5)
+detections: 1000; d uniform 42-48 au; selection p_det^3 and the Sample A photometric model from the .eff files
+catalogue H range: 9.98 to 13.92
+none: alpha=0.4882 beta=0.3408 H_B=11.8158 lnL=-829.245; single exponential alpha=0.6945
+model: alpha=0.4583 beta=0.3077 H_B=12.0978 lnL=-828.448; single exponential alpha=0.6954

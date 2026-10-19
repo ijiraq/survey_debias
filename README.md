@@ -453,6 +453,12 @@ Eq. B4):
 
 $$N(<H) = 10^{\alpha (H - H_o)} \exp\left[-10^{-\beta (H - H_B)}\right]$$
 
+Its local slope is $d\log_{10}N/dH = \alpha + \beta\,10^{-\beta(H - H_B)}$:
+$\alpha$ is the faint-end (small-object) slope, and the taper removes the
+bright, large-object end, brightward of $H_B$ (smaller $H$ is larger
+objects). [docs/lf_shape_fit/](docs/lf_shape_fit/) works through the
+likelihood and a fit to the cold JWST Sample A objects.
+
     survey_debias_hfit --survey survey.toml --root /path/to/project [--bootstrap 200]
 
 ### Likelihood
@@ -474,7 +480,14 @@ Detections from blocks of different depth or filter each use their own
 $S$. This assumes the H distribution does not depend on orbit (the
 population factorises as $\lambda(H)\,g(\text{orbit})$), needs no orbit
 model, and gives ordinary rather than weight-inflated uncertainties. $H_o$
-and the bias cancel from it. Photometric scatter is not modelled.
+and the bias cancel from it.
+
+Photometric scatter is modelled as OSSSSim does it: the true magnitude is
+latent, $\eta$ is applied to it, tracking and characterisation to the
+measured magnitude, and the measured magnitude follows the block's
+`mag_error=` / `phot_frac=` model (a `mag_err` column overrides it per
+detection). A `d_bary_err` column adds distance uncertainty, integrated over
+seven Gauss–Hermite nodes in $\ln d$.
 
 ### Normalisation and its uncertainty
 
@@ -524,9 +537,14 @@ two; the summary flags any parameter whose bootstrap 68% interval is less
 than half the posterior's. Replicates whose fit fails are dropped and counted in the summary.
 
 The parameters are strongly degenerate (Petit et al. 2023 make the same
-point): if the detections do not reach well past $H_B$, or the taper sits
+point). The taper is only constrained by detections brightward of $H_B$,
+and $\alpha$ only by detections well faintward of it: if the taper sits
 brighter than the brightest detection, $\beta$ and $H_B$ are set by their
-priors. The summary flags this.
+priors, and if $H_B$ is fainter than every detection, $\alpha$ describes
+magnitudes with no data and drifts to its bound. The summary flags the
+first case. With few detections the likelihood can have both solutions as
+separate maxima; the MLE starts from a fixed grid and can stop on the lower
+one, so read the MCMC posterior.
 
 ### Options
 

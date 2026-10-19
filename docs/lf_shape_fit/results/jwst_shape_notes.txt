@@ -1,8 +1,16 @@
-JWST Sample A shape-only MLE (docs demo script).
-alpha hits the lower bound 0.05 in all three treatments:
-with n=20 and most objects near the efficiency drop, the bright-end
-slope is not constrained by the conditional likelihood alone.
+JWST Sample A cold objects (n=12, H_r 8.59 to 13.07),
+shape-only MLE with survey_debias.hfit (docs demo).
+alpha is the faint-end slope (H >> H_B); the taper suppresses the bright end
+(H < H_B). Local slope d log10 N / dH = alpha + beta 10^(-beta (H - H_B)).
+'grid' is hfit.fit_mle from its fixed starting grid; the main columns are the
+better of that and a refit from the maximum of the profile in alpha.
 
-no measurement error: alpha=0.0500 beta=0.2513 Hb=11.2490 lnL=-29.6951
-photometric model from .eff: alpha=0.0500 beta=0.2487 Hb=11.2753 lnL=-29.6942
-photometry + 5% distance error: alpha=0.0500 beta=0.2557 Hb=11.2420 lnL=-29.6807
+no measurement error: alpha=0.2662 beta=2.0000 Hb=8.5584 lnL=-17.2786 (at prior edge: beta); grid start alpha=0.0500 beta=0.1236 Hb=13.7534 lnL=-17.7029; single exponential alpha=0.2393 [0.1461, 0.3405] lnL=-17.9061
+photometric model from .eff: alpha=0.2665 beta=2.0000 Hb=8.5584 lnL=-17.3061 (at prior edge: beta); grid start alpha=0.0500 beta=0.1235 Hb=13.7610 lnL=-17.7309; single exponential alpha=0.2394 [0.1462, 0.3407] lnL=-17.9329
+photometry + 5% distance error: alpha=0.2681 beta=2.0000 Hb=8.4736 lnL=-17.5476 (at prior edge: beta); grid start alpha=0.0500 beta=0.1240 Hb=13.7417 lnL=-17.7321; single exponential alpha=0.2391 [0.1458, 0.3404] lnL=-17.9276
+old single-epoch tanh selection: alpha=0.0500 beta=0.2115 Hb=11.3545 lnL=-18.4889 (at prior edge: alpha); grid start alpha=0.0500 beta=0.2115 Hb=11.3545 lnL=-18.4889; single exponential alpha=0.1566 [0.0778, 0.2395] lnL=-19.3480
+
+profile no measurement error: peak alpha=0.275; Delta lnL >= -0.5 for alpha 0.050 to 0.350; Delta lnL at 0.05 = -0.42, at 0.6 = -5.19
+profile photometric model from .eff: peak alpha=0.275; Delta lnL >= -0.5 for alpha 0.050 to 0.350; Delta lnL at 0.05 = -0.42, at 0.6 = -5.18
+profile photometry + 5% distance error: peak alpha=0.275; Delta lnL >= -0.5 for alpha 0.050 to 0.350; Delta lnL at 0.05 = -0.18, at 0.6 = -5.10
+profile old single-epoch tanh selection: peak alpha=0.050; Delta lnL >= -0.5 for alpha 0.050 to 0.150; Delta lnL at 0.05 = 0.00, at 0.6 = -11.22
