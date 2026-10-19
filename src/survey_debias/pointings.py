@@ -4,12 +4,18 @@ Each survey has its own directory. A block is every ``pointings.list`` line
 whose efficiency file is ``{block}.eff``; several such lines are tiles of
 one block (the footprint is their union). Multi-epoch surveys keep one
 ``pointings.list`` and ``{block}.eff`` per ``epoch{i}/`` directory with the
-same block tags, and a detection must be found at every epoch::
+same block tags, and ``survey.conf`` in the survey directory says at how
+many epochs a detection must be found::
 
     characterization/
       {survey}/
         pointings.list   {block}.eff ...           # single epoch
-        epoch1/pointings.list  epoch1/{block}.eff  # or one directory per epoch
+        survey.conf                                # or: detections_required = K
+        epoch1/pointings.list  epoch1/{block}.eff  #     one directory per epoch
+
+A multi-epoch ``characterization/{survey}`` is an OSSSSim survey root: newer
+ossssim loads every epoch from it in one Detos1 call and applies
+``detections_required`` itself.
 
 Line formats follow OSSSSim ``getsur.f95``::
 
@@ -32,6 +38,7 @@ from .efficiency import EpochSelection, SurveySelection, read_efficiency_file
 from .grid_bias import FieldView, parse_jpl_horizons_icrf
 
 POINTINGS_NAME = "pointings.list"
+SURVEY_CONF_NAME = "survey.conf"
 # getsur.f95 create_ears half sizes [rad]: body h, w and ear e_h, e_w.
 _EARS_H = 0.008678
 _EARS_W = 0.008545
@@ -58,6 +65,39 @@ def detos_reports_keys() -> bool:
 
 def ossssim_path_max() -> int:
     return OSSSSIM_KEY_PATH_MAX if detos_reports_keys() else OSSSSIM_PATH_MAX
+
+
+def detos_loads_survey_roots() -> bool:
+    """True when the installed ossssim loads multi-epoch survey roots."""
+    try:
+        import ossssim
+    except ImportError:
+        return False
+    return hasattr(ossssim, "read_survey_conf")
+
+
+def read_survey_conf(survey_dir) -> int | None:
+    """``detections_required`` from ``{survey_dir}/survey.conf``; None if absent.
+
+    Same ``key = value`` lines (``#`` comments) as ossssim's reader.
+    """
+    path = Path(survey_dir) / SURVEY_CONF_NAME
+    if not path.is_file():
+        return None
+    required = None
+    for number, raw in enumerate(path.read_text().splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == "detections_required":
+            try:
+                required = int(value.split()[0])
+            except (ValueError, IndexError):
+                raise ValueError(
+                    f"{path}:{number}: detections_required must be an integer"
+                ) from None
+    return required
 
 
 def _sexagesimal(text: str) -> float:
@@ -231,6 +271,7 @@ class Block:
     char_dirs: list            # one directory per epoch
     tiles: list                # tiles[epoch] -> list[Tile]
     selection: SurveySelection = field(repr=False, default=None)
+    detections_required: int = 1   # epochs at which a detection must be found
 
     @property
     def eff_name(self) -> str:
@@ -244,6 +285,18 @@ class Block:
     def detos_keys(self) -> list[str]:
         """What newer OSSSSim reports at each epoch: ``{directory}/{block}``."""
         return [f"{Path(d).name}/{self.name}" for d in self.char_dirs]
+
+    @property
+    def survey_root(self) -> Path:
+        """``characterization/{survey}``: the directory Detos1 loads in root mode."""
+        if self.n_epochs > 1:
+            return Path(self.char_dirs[0]).parent
+        return Path(self.char_dirs[0])
+
+    @property
+    def root_key(self) -> str:
+        """What Detos1 reports when given the survey root: ``{survey}/{block}``."""
+        return f"{self.survey_root.name}/{self.name}"
 
     @property
     def eff_paths(self) -> list[Path]:
@@ -322,7 +375,46 @@ def survey_epoch_dirs(char_root, survey: str) -> list[Path]:
         raise FileNotFoundError(
             f"{base}: no {POINTINGS_NAME} (or epoch1/{POINTINGS_NAME})"
         )
+    others = sorted(
+        p.name for p in base.iterdir()
+        if p.is_dir() and (p / POINTINGS_NAME).is_file() and p not in dirs
+    )
+    if others:
+        raise ValueError(
+            f"{base}: {', '.join(others)} also hold a {POINTINGS_NAME}; ossssim "
+            f"would load them as epochs. Name epoch directories epoch1..epoch{len(dirs)} "
+            "with no gaps, or move the others out."
+        )
     return dirs
+
+
+def survey_detections_required(char_root, survey: str, n_epochs: int) -> int:
+    """Epochs a detection must be found at, from ``survey.conf``.
+
+    A multi-epoch survey must say so explicitly: without ``survey.conf``
+    ossssim treats it as "any one epoch".
+    """
+    base = Path(char_root) / survey
+    required = read_survey_conf(base)
+    if n_epochs == 1:
+        if required not in (None, 1):
+            raise ValueError(
+                f"{base / SURVEY_CONF_NAME}: detections_required = {required} "
+                "but the survey has a single epoch"
+            )
+        return 1
+    if required is None:
+        raise ValueError(
+            f"{base}: {n_epochs} epoch directories but no {SURVEY_CONF_NAME}. Add "
+            f"'detections_required = {n_epochs}' to require every epoch "
+            "(ossssim's default is 1, any epoch)."
+        )
+    if not 1 <= required <= n_epochs:
+        raise ValueError(
+            f"{base / SURVEY_CONF_NAME}: detections_required = {required} must be "
+            f"between 1 and the {n_epochs} epochs"
+        )
+    return required
 
 
 def load_survey_blocks(char_root, survey: str, use_ossssim: bool = True
@@ -351,11 +443,13 @@ def load_survey_blocks(char_root, survey: str, use_ossssim: bool = True
                 f"characterization/{survey}: epoch{i} blocks "
                 f"{sorted(groups)} differ from epoch1 blocks {sorted(names)}"
             )
+    required = survey_detections_required(char_root, survey, len(dirs))
     blocks = {}
     for name in names:
         block = Block(
             survey=survey, name=name, char_dirs=list(dirs),
             tiles=[groups[name] for groups in per_epoch],
+            detections_required=required,
         )
         epochs: list[EpochSelection] = []
         for path in block.eff_paths:
@@ -445,7 +539,8 @@ class Project:
                 check_filter_name(block.filter, f"{survey}/{block.eff_name} filter=")
             if detos_reports_keys():
                 for block in blocks.values():
-                    parts = [block.name] + [Path(d).name for d in block.char_dirs]
+                    parts = ([block.name, block.survey_root.name]
+                             + [Path(d).name for d in block.char_dirs])
                     long = [p for p in parts if len(p) > DETOS_KEY_PART_LEN]
                     if long:
                         raise ValueError(

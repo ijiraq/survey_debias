@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Grid debiasing for JWST GO 1568 Sample A (Eduardo et al. 2026, AJ 172, 187).
 
-Seed for ``jwst-tno-followup``: copy this file (or ``jwst_sample_a.toml``)
+Seed for ``SurveyCharacterizations``: copy this file (or ``jwst_sample_a.toml``)
 into that project and keep the survey definition with its characterization
 files.
 
@@ -10,15 +10,16 @@ Short arcs do not constrain (a, e), so this survey uses ``model_ae``: cells in
 
 Expected layout under ``--root``::
 
-    data/jwst_sampleA.csv            # columns named in detection_columns below
-    colour.toml                      # "W-g" for F150W2 (see examples/colour.toml)
+    colour.toml                      # "H-g" for F150W2 (see examples/colour.toml)
     characterization/
-      JWST_A/
-        epoch1/ epoch2/ epoch3/      # pointings.list, sampleA.eff, JWST.csv in each
+      jwst_sample_a/
+        jwst_sample_a.csv            # columns named in detection_columns below
+        survey.conf                  # detections_required = 3
+        epoch1/ epoch2/ epoch3/      # pointings.list, jwst_sample_a.eff, JWST.csv in each
 
 Each ``pointings.list`` holds the mosaic for that epoch, for example::
 
-    0.2236068 0.2236068 209.3875 -10.865278 2459969.32118 1.0 JWST.csv sampleA.eff
+    0.2236068 0.2236068 209.3875 -10.865278 2459969.32118 1.0 JWST.csv jwst_sample_a.eff
 
 Run with the installed ``survey_debias`` command::
 
@@ -46,13 +47,15 @@ JWST_SAMPLE_A = GridSurvey(
         "d_bary": "d_bary",
         "comp": "comp",
     },
-    detection_defaults={"survey": "JWST_A", "block": "sampleA"},
+    detection_defaults={"survey": "jwst_sample_a", "block": "jwst_sample_a"},
+    surveys=("jwst_sample_a",),
     paper_reference_jd=2459974.5,
     rate_cut_min_arcsec_hr=0.03,
     rate_cut_max_arcsec_hr=8.66,
-    detections_relpath="data/jwst_sampleA.csv",
-    detections_full_name="JWST-free-cla_m.detections-full",
-    check_detected_title="detected flag≥4 at all 3 epochs",
+    detections_relpath="characterization/jwst_sample_a/jwst_sample_a.csv",
+    detections_full_name="characterization/jwst_sample_a/jwst_sample_a.detections-full",
+    results_name="characterization/jwst_sample_a/jwst_sample_a.bias.csv",
+    check_detected_title="detected at all 3 epochs",
     bias_method="model_ae",
 )
 

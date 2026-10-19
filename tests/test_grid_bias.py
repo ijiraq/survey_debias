@@ -35,14 +35,14 @@ SURVEY = grid_bias.GridSurvey(
         "d_bary": "d_bary",
         "comp": "comp",
     },
-    detection_defaults={"survey": "JWST_A", "block": "sampleA"},
+    detection_defaults={"survey": "jwst_sample_a", "block": "jwst_sample_a"},
     paper_reference_jd=2459974.5,
     detections_full_name="JWST-free-cla_m.detections-full",
     bias_method="model_ae",
 )
 # The geometry the helpers read, as a pointings.list tile provides it.
 FIELD = grid_bias.FieldView(
-    name="JWST_A/sampleA",
+    name="jwst_sample_a/jwst_sample_a",
     field_ra_deg=209.3875,
     field_dec_deg=-10.865278,
     mosaic_width_deg=math.sqrt(0.05),
@@ -763,8 +763,8 @@ class DetectionReader(unittest.TestCase):
             "survey", "block", "filter", "colour_group", "colour",
             "q", "ifree", "sin_ifree", "Hx", "cell", "bias",
         ])
-        self.assertEqual(table[0]["survey"], "JWST_A")
-        self.assertEqual(table[0]["block"], "sampleA")
+        self.assertEqual(table[0]["survey"], "jwst_sample_a")
+        self.assertEqual(table[0]["block"], "jwst_sample_a")
         self.assertTrue(any("bias_mode: union" in line for line in comments))
         self.assertEqual(table[0]["name"], "J1")
         self.assertEqual(table[0]["snr"], "4")

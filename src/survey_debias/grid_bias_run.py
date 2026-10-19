@@ -5,8 +5,10 @@ are grouped into blocks by their ``{block}.eff`` tag. For every bias cell
 occupied by a detection, the runner estimates P(detect in block | cell) for
 each block of the project by FoV-aimed draws: a tile is chosen with
 probability proportional to its area, an orbit is aimed into it, and the
-draw counts when Detos1 attributes the detection to that block
-(``row['Survey'] == {block}.eff``) at every epoch. The draw carries the
+draw counts when Detos1 attributes the detection to that block at the
+number of epochs ``survey.conf`` requires. With an ossssim that loads
+multi-epoch survey roots, Detos1 is given ``characterization/{survey}``
+once and applies that requirement itself. The draw carries the
 single-epoch geometric probability for the block's total area, so the mean
 over draws is the block bias.
 
@@ -62,7 +64,7 @@ from .bias_files import (  # noqa: F401 - re-exported
     mc_bias,
     save_bias_file,
 )
-from .pointings import Block, Project, observer_icrf
+from .pointings import Block, Project, detos_loads_survey_roots, observer_icrf
 
 # Draws per cell for a block that never detects it, as a multiple of target.
 MAX_AIMED_FACTOR = 20
@@ -71,27 +73,39 @@ MAX_AIMED_FACTOR = 20
 class GridBiasSimulator:
     """One OSSSSim and RNG stream over one survey's characterization epochs.
 
-    Detos1 reloads characterization when the directory changes without
-    resetting ran3. A detection requires flag ≥ 4 at every epoch directory
-    and, to count for a block, Detos1 must attribute it to that block's
-    ``.eff`` at every epoch.
+    Root mode (multi-epoch survey and an ossssim that loads survey roots):
+    one Detos1 call on ``characterization/{survey}`` per draw; Detos1 applies
+    ``detections_required`` from ``survey.conf`` and reports ``{survey}/{block}``.
+
+    Otherwise Detos1 is called once per epoch directory, which reloads the
+    characterization without resetting ran3, and :func:`attributed_to`
+    counts the epochs that found the object in the block.
     """
 
     def __init__(self, survey_name: str, blocks: dict, colours, model_band: str,
-                 seed: int = 42):
+                 seed: int = 42, root_mode: bool | None = None):
         self.name = survey_name
         self.blocks = blocks
         first = next(iter(blocks.values()))
         self.epoch_dirs = [str(Path(d).resolve()) for d in first.char_dirs]
+        if root_mode is None:
+            root_mode = first.n_epochs > 1 and detos_loads_survey_roots()
+        self.root_mode = bool(root_mode)
+        self.sim_dirs = ([str(first.survey_root.resolve())] if self.root_mode
+                         else self.epoch_dirs)
         self.element_epoch = first.tiles[0][0].jd
         self.colours = colours
         self.model_band = model_band
-        self.sim = OSSSSim(self.epoch_dirs[0], seed=seed)
+        how = ("one Detos1 call on the survey root" if self.root_mode
+               else f"{len(self.sim_dirs)} Detos1 call(s), one per epoch directory")
+        print(f"{survey_name}: {how}; detection at {first.detections_required} "
+              f"of {first.n_epochs} epoch(s)", flush=True)
+        self.sim = OSSSSim(self.sim_dirs[0], seed=seed)
         self._prime_surveys()
 
     def _prime_surveys(self) -> None:
-        for epoch_dir in self.epoch_dirs:
-            self.sim.characterization_directory = epoch_dir
+        for sim_dir in self.sim_dirs:
+            self.sim.characterization_directory = sim_dir
             self.sim.simulate(self._row(44, 0.0, 20, 0, 0, 0, 8, self.element_epoch),
                               colors=self.colours, model_band=self.model_band)
 
@@ -108,10 +122,11 @@ class GridBiasSimulator:
 
     def epoch_rows(self, a, e, inc, node, peri, M, H, epoch_jd=None,
                    comp="default", debug=False) -> list[dict]:
+        """Detos1 rows: one per epoch directory, or a single row in root mode."""
         jd = self.element_epoch if epoch_jd is None else epoch_jd
         return [
             self._simulate(d, self._row(a, e, inc, node, peri, M, H, jd, comp), debug=debug)
-            for d in self.epoch_dirs
+            for d in self.sim_dirs
         ]
 
 
@@ -123,21 +138,29 @@ def _survey_name(row: dict) -> str:
 
 
 def attributed_to(rows: list[dict], block: Block) -> bool:
-    """flag ≥ 4 at every epoch, each time in a pointing tagged ``{block}.eff``.
+    """Detected in a pointing tagged ``{block}.eff`` at enough epochs.
 
-    Detos1 reports ``{directory}/{block}`` (current OSSSSim) or the first 10
-    characters of ``{block}.eff`` (older OSSSSim).
+    One row for a multi-epoch block is a root-mode Detos1 result: Detos1 has
+    already required ``detections_required`` epochs, and reports
+    ``{survey}/{block}``. Otherwise there is one row per epoch directory and
+    at least ``block.detections_required`` of them need flag ≥ 4 in this
+    block; Detos1 reports ``{directory}/{block}`` (current OSSSSim) or the
+    first 10 characters of ``{block}.eff`` (older OSSSSim).
     """
+    if len(rows) == 1 and block.n_epochs > 1:
+        r = rows[0]
+        return int(r["flag"]) >= 4 and _survey_name(r) == block.root_key
     keys = block.detos_keys()
     legacy = block.detos_name.strip()
+    found = 0
     for i, r in enumerate(rows):
         if int(r["flag"]) < 4:
-            return False
+            continue
         name = _survey_name(r)
         expected = keys[i] if "/" in name and i < len(keys) else legacy
-        if name != expected:
-            return False
-    return True
+        if name == expected:
+            found += 1
+    return found >= block.detections_required
 
 
 def _jd_utc(jd: float) -> str:
@@ -200,11 +223,15 @@ def sanity_check_simulator(sim: GridBiasSimulator, block: Block, survey: GridSur
                 flush=True,
             )
     rows = sim.epoch_rows(a, e, inc, node, peri, M, 8.0, epoch_jd=jd0, debug=True)
-    for i, row in enumerate(rows, start=1):
-        print(f"sanity Detos1 epoch{i} {_detos_sky(row)}", flush=True)
+    if len(rows) == 1 and block.n_epochs > 1:
+        print(f"sanity Detos1 survey root ({block.detections_required} of "
+              f"{block.n_epochs} epochs) {_detos_sky(rows[0])}", flush=True)
+    else:
+        for i, row in enumerate(rows, start=1):
+            print(f"sanity Detos1 epoch{i} {_detos_sky(row)}", flush=True)
     if attributed_to(rows, block):
-        print(f"sanity: LOS-planted object is a {block.n_epochs}-epoch detection "
-              f"in {block.eff_name}", flush=True)
+        print(f"sanity: LOS-planted object is detected at {block.detections_required} "
+              f"of {block.n_epochs} epoch(s) in {block.eff_name}", flush=True)
         return
     if block.n_epochs > 1:
         retried = sim.epoch_rows(a, e, inc, node, peri, M, 8.0, epoch_jd=jd0)
@@ -224,7 +251,8 @@ def sanity_check_simulator(sim: GridBiasSimulator, block: Block, survey: GridSur
     )
     raise RuntimeError(
         f"LOS-planted object at {block.survey}/{block.name} line {tile.line} was "
-        f"not a {block.n_epochs}-epoch detection in {block.eff_name} "
+        f"not detected at {block.detections_required} of {block.n_epochs} epoch(s) "
+        f"in {block.eff_name} "
         f"(flags={flags}, surveys={names}{'; ' + detail if detail else ''})."
     )
 
@@ -440,7 +468,8 @@ def run_grid_bias(survey: GridSurvey, root: Path, target: int = TARGET_DETECTION
             f"  {b.survey}/{b.name}: {len(b.tiles[0])} tile(s), "
             f"{b.area_deg2:.4f} deg² footprint ({b.aim_area_deg2:.4f} sampled), "
             f"filter {b.filter}, {b.n_epochs} epoch(s) "
-            f"JD {', '.join(f'{jd:.5f}' for jd in b.epoch_jds())}; "
+            f"JD {', '.join(f'{jd:.5f}' for jd in b.epoch_jds())}, "
+            f"detection at {b.detections_required}; "
             f"P_geom(i=7°) ~ {p_geo:.2e}",
             flush=True,
         )

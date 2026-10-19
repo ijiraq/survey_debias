@@ -168,6 +168,20 @@ class Blocks(unittest.TestCase):
             self.assertAlmostEqual(ours[name].area_deg2, theirs[name].area_deg2,
                                    delta=0.01 * ours[name].area_deg2)
 
+    @unittest.skipUnless(HAVE_OSSSSIM and pointings.detos_loads_survey_roots(),
+                         "needs ossssim with multi-epoch survey roots")
+    def test_ossssim_reads_the_same_survey_root(self):
+        from ossssim import SurveyCharacterization
+
+        with short_tempdir() as tmp:
+            make_survey(Path(tmp), "S", ["0.2 0.2 10.0 0.0 2459000.5 1.0 500 b1.eff\n"],
+                        {"b1": "r"}, epochs=3)
+            block = Project(tmp).block("S", "b1")
+            loaded = SurveyCharacterization.from_directory(str(block.survey_root))
+        self.assertEqual(loaded.n_epochs, block.n_epochs)
+        self.assertEqual(loaded.detections_required, block.detections_required)
+        self.assertEqual({p.key for p in loaded}, {block.root_key})
+
     def test_long_paths_are_refused_before_fortran(self):
         tile = parse_pointings.__globals__["Tile"](
             ra_deg=0, dec_deg=0, width_deg=1, height_deg=1, area_deg2=1, fill=1,
@@ -187,7 +201,7 @@ class Colours(unittest.TestCase):
     def test_rebased_to_model_band_by_group(self):
         with short_tempdir() as tmp:
             colours = self._project(tmp).colours
-        self.assertAlmostEqual(colours.colour("W", "default"), -1.0)
+        self.assertAlmostEqual(colours.colour("H", "default"), -1.0)
         self.assertAlmostEqual(colours.colour("F", "hot"), 0.3)
         self.assertAlmostEqual(colours.colour("F", "cold_classical"), 0.4)
         self.assertAlmostEqual(colours.colour("r", "cold"), 0.0)
@@ -198,10 +212,10 @@ class Colours(unittest.TestCase):
     def test_colour_for_uses_block_filter(self):
         with short_tempdir() as tmp:
             make_survey(Path(tmp), "S", ["0.2 0.2 10.0 0.0 2459000.5 1.0 500 b1.eff\n"],
-                        {"b1": "W"})
+                        {"b1": "H"})
             project = self._project(tmp)
             filt, colour, group = project.colour_for("S", "b1", "cold")
-        self.assertEqual((filt, group), ("W", "cold"))
+        self.assertEqual((filt, group), ("H", "cold"))
         self.assertAlmostEqual(colour, -1.0)
 
     def test_missing_filter_and_band_are_errors(self):
@@ -210,10 +224,10 @@ class Colours(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no colour for filter 'z'"):
                 colours.colour("z", "default")
             with self.assertRaisesRegex(ValueError, "filter\\(s\\) z"):
-                colours.validate({"W", "z"})
+                colours.validate({"H", "z"})
         with short_tempdir() as tmp:
             with self.assertRaisesRegex(ValueError, "model_band 'i'"):
-                self._project(tmp, model_band="i").colours.colour("W")
+                self._project(tmp, model_band="i").colours.colour("H")
 
     def test_bad_colour_files(self):
         for text, msg in (
@@ -231,6 +245,107 @@ class Colours(unittest.TestCase):
             colours = Project(tmp, use_ossssim=False).colours
         self.assertIn("not found", colours.note)
         self.assertAlmostEqual(colours.colour("r"), 0.0)
+
+
+class SurveyConf(unittest.TestCase):
+    LINE = ["0.2 0.2 10.0 0.0 2459000.5 1.0 500 b1.eff\n"]
+
+    def test_read_survey_conf(self):
+        with short_tempdir() as tmp:
+            base = Path(tmp)
+            self.assertIsNone(pointings.read_survey_conf(base))
+            (base / "survey.conf").write_text("# c\n\nother = 1\ndetections_required = 2  # AND\n")
+            self.assertEqual(pointings.read_survey_conf(base), 2)
+            (base / "survey.conf").write_text("detections_required = two\n")
+            with self.assertRaisesRegex(ValueError, "survey.conf:1"):
+                pointings.read_survey_conf(base)
+
+    def test_multi_epoch_block_carries_requirement_and_root(self):
+        with short_tempdir() as tmp:
+            make_survey(Path(tmp), "S", self.LINE, {"b1": "r"}, epochs=3,
+                        detections_required=2)
+            block = Project(tmp, use_ossssim=False).block("S", "b1")
+        self.assertEqual(block.n_epochs, 3)
+        self.assertEqual(block.detections_required, 2)
+        self.assertEqual(block.survey_root.name, "S")
+        self.assertEqual(block.root_key, "S/b1")
+
+    def test_single_epoch_defaults_to_one(self):
+        with short_tempdir() as tmp:
+            make_survey(Path(tmp), "S", self.LINE, {"b1": "r"})
+            block = Project(tmp, use_ossssim=False).block("S", "b1")
+            self.assertEqual(block.detections_required, 1)
+            self.assertEqual(block.root_key, "S/b1")
+            (Path(tmp) / "characterization/S/survey.conf").write_text("detections_required = 2\n")
+            with self.assertRaisesRegex(ValueError, "single epoch"):
+                Project(tmp, use_ossssim=False).blocks("S")
+
+    def test_multi_epoch_needs_valid_survey_conf(self):
+        with short_tempdir() as tmp:
+            make_survey(Path(tmp), "S", self.LINE, {"b1": "r"}, epochs=2)
+            conf = Path(tmp) / "characterization/S/survey.conf"
+            conf.unlink()
+            with self.assertRaisesRegex(ValueError, "detections_required = 2"):
+                Project(tmp, use_ossssim=False).blocks("S")
+            for bad in (0, 3):
+                conf.write_text(f"detections_required = {bad}\n")
+                with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "between 1"):
+                    Project(tmp, use_ossssim=False).blocks("S")
+
+    def test_stray_epoch_like_directory_is_refused(self):
+        with short_tempdir() as tmp:
+            make_survey(Path(tmp), "S", self.LINE, {"b1": "r"}, epochs=2)
+            extra = Path(tmp) / "characterization/S/visit3"
+            extra.mkdir()
+            (extra / "pointings.list").write_text(self.LINE[0])
+            with self.assertRaisesRegex(ValueError, "visit3"):
+                Project(tmp, use_ossssim=False).blocks("S")
+
+
+class _FakeOSSSSim:
+    """Records the characterization directory of every simulate() call."""
+
+    def __init__(self, characterization_directory, seed):
+        self.characterization_directory = characterization_directory
+        self.dirs = []
+
+    def simulate(self, row, colors, model_band, debug=False):
+        self.dirs.append(Path(self.characterization_directory).name)
+        return dict(flag=4, Survey="S/b1", RA=0.1, DEC=0.0)
+
+
+class SimulatorModes(unittest.TestCase):
+    def _sim(self, tmp, root_mode):
+        from survey_debias import grid_bias_run
+
+        make_survey(Path(tmp), "S", ["0.2 0.2 10.0 0.0 2459000.5 1.0 500 b1.eff\n"],
+                    {"b1": "r"}, epochs=3)
+        blocks = Project(tmp, use_ossssim=False).blocks("S")
+        with mock.patch.object(grid_bias_run, "OSSSSim", _FakeOSSSSim), \
+                mock.patch.object(grid_bias_run, "detos_loads_survey_roots",
+                                  return_value=root_mode):
+            sim = grid_bias_run.GridBiasSimulator("S", blocks, None, "r")
+        return sim, blocks["b1"]
+
+    def test_root_mode_calls_detos1_once_on_the_survey_root(self):
+        from survey_debias.grid_bias_run import attributed_to
+
+        with short_tempdir() as tmp:
+            sim, block = self._sim(tmp, root_mode=True)
+            self.assertTrue(sim.root_mode)
+            self.assertEqual(sim.sim.dirs, ["S"])  # priming
+            rows = sim.epoch_rows(44, 0.0, 5, 0, 0, 0, 8)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(sim.sim.dirs, ["S", "S"])
+        self.assertTrue(attributed_to(rows, block))
+
+    def test_older_ossssim_loops_over_epoch_directories(self):
+        with short_tempdir() as tmp:
+            sim, _ = self._sim(tmp, root_mode=False)
+            self.assertFalse(sim.root_mode)
+            rows = sim.epoch_rows(44, 0.0, 5, 0, 0, 0, 8)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(sim.sim.dirs[3:], ["epoch1", "epoch2", "epoch3"])
 
 
 class _StubSimulator:
@@ -283,6 +398,29 @@ class Attribution(unittest.TestCase):
         rows = [dict(flag=4, Survey=b"epoch1/b1"), dict(flag=4, Survey="epoch2/b1 ")]
         self.assertTrue(attributed_to(rows, multi))
         self.assertFalse(attributed_to([rows[0], dict(rows[1], flag=2)], multi))
+
+    def test_attributed_to_root_mode_single_row(self):
+        from survey_debias.grid_bias_run import attributed_to
+
+        with short_tempdir() as tmp:
+            multi = self._block(tmp, "b1", epochs=3)
+        self.assertEqual(multi.root_key, "S/b1")
+        self.assertTrue(attributed_to([dict(flag=4, Survey=b"S/b1 ")], multi))
+        self.assertFalse(attributed_to([dict(flag=3, Survey="S/b1")], multi))
+        self.assertFalse(attributed_to([dict(flag=4, Survey="epoch1/b1")], multi))
+
+    def test_attributed_to_per_epoch_k_of_n(self):
+        from survey_debias.grid_bias_run import attributed_to
+
+        with short_tempdir() as tmp:
+            make_survey(Path(tmp), "S", ["0.2 0.2 10.0 0.0 2459000.5 1.0 500 b1.eff\n"],
+                        {"b1": "r"}, epochs=3, detections_required=2)
+            block = Project(tmp, use_ossssim=False).block("S", "b1")
+        good = [dict(flag=4, Survey=f"epoch{i}/b1") for i in (1, 2, 3)]
+        self.assertTrue(attributed_to(good, block))
+        self.assertTrue(attributed_to([good[0], dict(flag=0, Survey=""), good[2]], block))
+        self.assertFalse(attributed_to([good[0], dict(flag=0, Survey=""),
+                                        dict(good[2], flag=2)], block))
 
     def test_cell_bias_counts_only_this_blocks_detections(self):
         from survey_debias.grid_bias_run import compute_cell_bias

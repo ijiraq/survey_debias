@@ -55,7 +55,7 @@ class SurveyLoading(unittest.TestCase):
         survey = survey_debias.load_survey(str(EXAMPLES / "jwst_sample_a.py"))
         self.assertEqual(survey.bias_method, "model_ae")
         self.assertEqual(survey.model_band, "r")
-        self.assertEqual(survey.detection_defaults["survey"], "JWST_A")
+        self.assertEqual(survey.detection_defaults["survey"], "jwst_sample_a")
 
     def test_mag_column_belongs_in_detection_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,8 +153,7 @@ class CommandLine(unittest.TestCase):
     def test_dry_run_lists_model_ae_cells_without_simulator(self):
         with short_tempdir() as tmp:
             root = make_jwst_project(Path(tmp))
-            (root / "data").mkdir()
-            (root / "data" / "jwst_sampleA.csv").write_text(
+            _jwst_detections(root).write_text(
                 DETECTIONS_HEADER
                 + "JPB04,43.7,0.06,1.85,46.20,cold,26.0\n"
                 + "JPB07,45.7,0.05,1.40,46.20,cold,26.0\n"
@@ -168,8 +167,9 @@ class CommandLine(unittest.TestCase):
         self.assertIn("3 objects, 2 cells", out)
         self.assertIn("[cold]", out)
         self.assertIn("JPB04, JPB07", out)
-        self.assertIn("JWST_A/sampleA: filter W, 3 epoch(s), 1 tile(s)", out)
-        self.assertIn("JWST_A/sampleA: 3 detection(s)", out)
+        self.assertIn("jwst_sample_a/jwst_sample_a: filter H, 3 epoch(s) "
+                      "(detection at 3), 1 tile(s)", out)
+        self.assertIn("jwst_sample_a/jwst_sample_a: 3 detection(s)", out)
         self.assertIn("orbit model:", out)
         self.assertIn("MISSING", out)  # no orbit model under the temp root
         self.assertNotIn("MISSING or invalid", out)
@@ -178,8 +178,7 @@ class CommandLine(unittest.TestCase):
     def test_dry_run_reports_missing_characterization(self):
         with short_tempdir() as tmp:
             root = Path(tmp)
-            (root / "data").mkdir()
-            (root / "data" / "jwst_sampleA.csv").write_text(
+            _jwst_detections(root).write_text(
                 DETECTIONS_HEADER + "JPB04,43.7,0.06,1.85,46.20,cold,26.0\n"
             )
             code, out, err = self._run(
@@ -189,7 +188,7 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("characterization:", out)
         self.assertIn("MISSING or invalid", out)
-        self.assertIn("JWST_A", out)
+        self.assertIn("jwst_sample_a", out)
 
     def test_dry_run_per_block_counts_blocks(self):
         with short_tempdir() as tmp:
@@ -237,8 +236,7 @@ class CommandLine(unittest.TestCase):
             survey.write_text(_with_detection_columns(
                 'mag = "m_f150w2"\nd_bary = "d_bary"\ni = "i"\n'
             ))
-            (root / "data").mkdir()
-            (root / "data" / "jwst_sampleA.csv").write_text(
+            _jwst_detections(root).write_text(
                 "i,d_bary,m_f150w2\n"
                 "1.85,46.20,26.0\n"
                 "1.40,46.20,26.0\n"
@@ -253,7 +251,7 @@ class CommandLine(unittest.TestCase):
         self.assertIn("derived columns:", out)
         self.assertIn("Hx", out)
         self.assertIn("colour", out)
-        self.assertIn("bias_results.csv", out)
+        self.assertIn("jwst_sample_a.bias.csv", out)
 
     def test_dry_run_applies_detection_columns(self):
         with short_tempdir() as tmp:
@@ -265,8 +263,7 @@ class CommandLine(unittest.TestCase):
                 'i = "incl"\n'
                 'd_bary = "dist"\n'
             ))
-            (root / "data").mkdir()
-            (root / "data" / "jwst_sampleA.csv").write_text(
+            _jwst_detections(root).write_text(
                 "object,incl,dist,m_f150w2\n"
                 "JPB04,1.85,46.20,26.0\n"
             )
@@ -281,8 +278,7 @@ class CommandLine(unittest.TestCase):
     def test_missing_detection_column_exits_with_error(self):
         with short_tempdir() as tmp:
             root = make_jwst_project(Path(tmp))
-            (root / "data").mkdir()
-            (root / "data" / "jwst_sampleA.csv").write_text("name,mag\nJ1,26\n")
+            _jwst_detections(root).write_text("name,mag\nJ1,26\n")
             code, _, err = self._run(
                 "--survey", str(EXAMPLES / "jwst_sample_a.toml"),
                 "--root", str(root), "--dry-run",
@@ -292,11 +288,18 @@ class CommandLine(unittest.TestCase):
         self.assertIn("survey_debias:", err)
 
 
+def _jwst_detections(root: Path) -> Path:
+    """Detections file of the examples/jwst_sample_a layout (made if absent)."""
+    path = root / "characterization" / "jwst_sample_a" / "jwst_sample_a.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _with_detection_columns(body: str) -> str:
     text = (EXAMPLES / "jwst_sample_a.toml").read_text()
     head = text.split("\n[detection_columns]", 1)[0].rstrip()
     return (head + "\n\n[detection_columns]\n" + body.strip() + "\n\n"
-            '[detection_defaults]\nsurvey = "JWST_A"\nblock = "sampleA"\n')
+            '[detection_defaults]\nsurvey = "jwst_sample_a"\nblock = "jwst_sample_a"\n')
 
 
 if __name__ == "__main__":

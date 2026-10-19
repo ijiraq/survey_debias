@@ -20,9 +20,8 @@
 "I-g" = -1.2
 "w-g" = -0.8
 "J-g" = -1.5
-"H-g" = -1.6
-# JWST NIRCam F150W2: m_r = m_F150W2 + 1
-"W-g" = -1.7
+# JWST NIRCam F150W2 is labelled H (close to 2MASS H): m_r = m_F150W2 + 1
+"H-g" = -1.7
 # HST ACS F606W STMAG: r_AB = STMAG - 0.3
 "F-g" = -0.4
 
@@ -38,6 +37,5 @@
 "I-g" = -1.2
 "w-g" = -0.8
 "J-g" = -1.5
-"H-g" = -1.6
-"W-g" = -1.7
+"H-g" = -1.7
 "F-g" = -0.4

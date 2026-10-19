@@ -130,8 +130,15 @@ def block_selections(project, sample: "HSample", eff_files=None,
     out = {}
     for group in np.unique(sample.group):
         survey, _, block = str(group).partition("/")
+        found = project.block(survey, block) if project else None
+        if found is not None and found.detections_required < found.n_epochs:
+            raise ValueError(
+                f"{survey}/{block}: the H fit multiplies the selection over "
+                f"every epoch, but survey.conf requires only "
+                f"{found.detections_required} of {found.n_epochs}"
+            )
         if efficiency or eff_files:
-            n = project.block(survey, block).n_epochs if project else 1
+            n = found.n_epochs if found is not None else 1
             if efficiency:
                 out[group] = SurveySelection([parse_efficiency_spec(efficiency)] * n)
             else:
@@ -142,7 +149,7 @@ def block_selections(project, sample: "HSample", eff_files=None,
                     raise ValueError(f"give one --eff-file, or one per epoch ({n})")
                 out[group] = SurveySelection([read_efficiency_file(f) for f in files])
         else:
-            out[group] = project.block(survey, block).selection
+            out[group] = found.selection
     return out
 
 

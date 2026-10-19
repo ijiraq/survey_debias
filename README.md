@@ -58,8 +58,9 @@ plants synthetic objects whose orbits pass through one of the block's tiles
 (chosen with probability proportional to tile area), runs them through
 `ossssim` at every epoch of that survey, and keeps going until `--target`
 detections accumulate (default 5000). A plant counts for the block only if
-OSSSSim's `detos1` reports flag ≥ 4 at every epoch **and** attributes the
-detection to that block's `.eff` file each time. The block's bias for the
+OSSSSim's `detos1` reports flag ≥ 4 at the number of epochs the survey's
+`survey.conf` requires **and** attributes the detection to that block's
+`.eff` file. The block's bias for the
 cell is the mean, over aimed plants, of
 
     x = 1[detected in block] × P(orbit crosses the block's footprint)
@@ -169,14 +170,14 @@ characterization files live and passed to `survey_debias --survey`.
 `examples/` has both forms for each project, to seed those projects:
 
 - `examples/jwst_sample_a.toml` / `.py`: JWST GO 1568 Sample A (Eduardo et
-  al. 2026); `model_ae`; survey `JWST_A`, block `sampleA`, three epochs.
-  Seed for `jwst-tno-followup`.
+  al. 2026); `model_ae`; survey `jwst_sample_a`, block `jwst_sample_a`, three epochs.
+  Seed for `SurveyCharacterizations`.
 - `examples/hst_n26.toml` / `.py`: HST GO-9433 reanalysis (Napier et al.
   2026); `aq_grid`; survey and block `N26`, a single 15-day heliostack.
   Seed for `hst-tno-followup`.
 - `examples/pointings.list`: every `pointings.list` line format.
 - `examples/colour.toml`: colours for the default and cold groups, including
-  JWST F150W2 (`W`) and HST F606W STMAG (`F`).
+  JWST F150W2 (labelled `H`, with r − H = 1.0) and HST F606W STMAG (`F`).
 
 A TOML file has up to three tables:
 
@@ -198,7 +199,7 @@ A TOML file has up to three tables:
 [survey]
 name = "JWST Sample A"
 model_band = "r"
-detections_relpath = "data/jwst_sampleA.csv"
+detections_relpath = "characterization/jwst_sample_a/jwst_sample_a.csv"
 bias_method = "model_ae"
 
 [detection_columns]
@@ -208,8 +209,8 @@ i = "i"
 comp = "comp"
 
 [detection_defaults]
-survey = "JWST_A"
-block = "sampleA"
+survey = "jwst_sample_a"
+block = "jwst_sample_a"
 ```
 
 Unknown or missing required fields are errors. The geometry fields of
@@ -220,11 +221,13 @@ points to `pointings.list` or `colour.toml`.
 
 ## Survey directory layout
 
-The runner reads and writes inside a project root passed as `--root`:
+The runner reads and writes inside a project root passed as `--root`. Every
+path in the survey file is relative to it, so a survey's TOML, detections,
+and outputs can sit in its own `characterization/{survey}/` directory:
 
     <root>/
-      data/<detections>.csv              # detections_relpath
-      colour.toml                        # colour_file
+      <detections>.csv                   # detections_relpath (anywhere under root)
+      colour.toml                        # colour_file: one table for the whole run
       Models/OSSOS/                      # default orbit model (model_ae only)
       characterization/
         {survey}/
@@ -233,6 +236,7 @@ The runner reads and writes inside a project root passed as `--root`:
           <observer>.csv                 # JPL Horizons vectors, if not an MPC code
           bias_grid[_rih].csv            # written: this survey's bias table
         {survey}/                        # or, for a multi-epoch survey:
+          survey.conf                    # detections_required = K
           epoch1/pointings.list  epoch1/{block}.eff
           epoch2/pointings.list  epoch2/{block}.eff
           ...
@@ -255,14 +259,27 @@ are aimed at a tile chosen in proportion to its area, at that tile's JD,
 and the geometric probability uses the block's total area. Footprint areas
 are cross-checked against OSSSSim's own reader.
 
-A multi-epoch survey has one `epoch{i}/` directory per epoch, each with its
-own `pointings.list` (that epoch's JDs) and `{block}.eff` files, and the same
-block names in every epoch. A detection must be found, in the same block, at
-every epoch.
+A multi-epoch survey has one `epoch{i}/` directory per epoch (`epoch1`,
+`epoch2`, … with no gaps), each with its own `pointings.list` (that epoch's
+JDs) and `{block}.eff` files, and the same block names in every epoch.
+`characterization/{survey}/survey.conf` must say at how many epochs a
+detection has to be found, in the same block:
+
+    # every epoch (AND); 1 would be any epoch (OR)
+    detections_required = 3
+
+This is the OSSSSim survey-root format. With an ossssim that loads survey
+roots (it exports `read_survey_conf`), the runner gives Detos1
+`characterization/{survey}` once per plant and Detos1 applies
+`detections_required` itself. Older ossssim builds are called once per
+`epoch{i}` directory and the runner counts the epochs. The H-distribution
+fit multiplies the selection over epochs, so it needs
+`detections_required` equal to the number of epochs.
 
 OSSSSim's `detos1` reports which block detected an object as the key
 `{directory}/{block}`, where `{directory}` is the survey directory (or
-`epoch{i}`); each part may be at most 32 characters, and characterization
+`epoch{i}` when an epoch directory is loaded on its own); each part may be
+at most 32 characters, and characterization
 paths at most 2048. Older OSSSSim builds report only the first 10
 characters of `{block}.eff` and open paths of at most 100 characters; with
 those, blocks of one survey must differ within the first 10 characters.
@@ -287,12 +304,12 @@ spectral group, each mapping band ratios `"X-g"` to colours in magnitudes.
 [default]
 "g-g" = 0.0
 "r-g" = -0.7
-"W-g" = -1.7    # JWST F150W2: m_r = m_F150W2 + 1
+"H-g" = -1.7    # JWST F150W2 labelled H: m_r = m_F150W2 + 1
 
 [cold]
 "g-g" = 0.0
 "r-g" = -0.85
-"W-g" = -1.85
+"H-g" = -1.85
 ```
 
 A detection's spectral group is the first group whose name appears in its

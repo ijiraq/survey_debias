@@ -81,7 +81,8 @@ def _describe_project(project, names) -> tuple[list, list[str]]:
             continue
         for b in found.values():
             blocks.append(b)
-            print(f"  {s}/{b.name}: filter {b.filter}, {b.n_epochs} epoch(s), "
+            print(f"  {s}/{b.name}: filter {b.filter}, {b.n_epochs} epoch(s) "
+                  f"(detection at {b.detections_required}), "
                   f"{len(b.tiles[0])} tile(s), {b.area_deg2:.4f} deg² "
                   f"(sampled {b.aim_area_deg2:.4f} deg²)")
             for t in b.tiles[0]:
