@@ -174,10 +174,11 @@ characterization files live and passed to `survey_debias --survey`.
   Seed for `SurveyCharacterizations`.
 - `examples/hst_n26.toml` / `.py`: HST GO-9433 reanalysis (Napier et al.
   2026); `aq_grid`; survey and block `N26`, a single 15-day heliostack.
-  Seed for `hst-tno-followup`.
+  Seed for `SurveyCharacterizations`.
 - `examples/pointings.list`: every `pointings.list` line format.
 - `examples/colour.toml`: colours for the default and cold groups, including
-  JWST F150W2 (labelled `H`, with r − H = 1.0) and HST F606W STMAG (`F`).
+  JWST F150W2 (labelled `H`, with r − H = 1.0) and HST F606W STMAG
+  (labelled `t`, with t − r = 0.3).
 
 A TOML file has up to three tables:
 

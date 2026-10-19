@@ -202,8 +202,8 @@ class Colours(unittest.TestCase):
         with short_tempdir() as tmp:
             colours = self._project(tmp).colours
         self.assertAlmostEqual(colours.colour("H", "default"), -1.0)
-        self.assertAlmostEqual(colours.colour("F", "hot"), 0.3)
-        self.assertAlmostEqual(colours.colour("F", "cold_classical"), 0.4)
+        self.assertAlmostEqual(colours.colour("t", "hot"), 0.3)
+        self.assertAlmostEqual(colours.colour("t", "cold_classical"), 0.4)
         self.assertAlmostEqual(colours.colour("r", "cold"), 0.0)
         self.assertEqual(colours.group("cold_classical"), "cold")
         self.assertEqual(colours.group("resonant"), "default")

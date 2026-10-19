@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Grid debiasing for the N26 HST heliostack (Napier et al. 2026, PSJ 7, 117).
 
-Seed for ``hst-tno-followup``: copy this file (or ``hst_n26.toml``) into
-that project and keep the survey definition with its characterization files.
+Seed for ``SurveyCharacterizations``: copy this file (or ``hst_n26.toml``)
+into that project and keep the survey definition with its characterization
+files.
 
 N26 reanalyses the Bernstein et al. 2004 GO-9433 ACS/WFC F606W field as a
 single 15-day heliostack (not a multi-epoch AND). Orbits are well enough
@@ -10,13 +11,13 @@ determined to use ``aq_grid`` cells in (a, q, sin i_free, H).
 
 Expected layout under ``--root``::
 
-    data/n26_detections.csv          # columns named in detection_columns below
-    colour.toml                      # "F-g" for F606W STMAG
+    colour.toml                      # "t-g" for F606W STMAG (see examples/colour.toml)
     characterization/
       N26/
+        N26.csv                      # columns named in detection_columns below
         pointings.list               # 6-tile 400" x 600" mosaic, one line
         HST.csv                      # ICRF observer positions
-        N26.eff                      # filter= F
+        N26.eff                      # filter= t (F606W STMAG, neither r nor w)
 
 with ``pointings.list``::
 
@@ -37,6 +38,7 @@ from survey_debias import GridSurvey
 N26_HELIOSTACK = GridSurvey(
     name="N26 heliostack",
     model_band="r",
+    colour_file="colour.toml",
     detection_columns={
         "mag": "m_stmag",
         "name": "name",
@@ -47,11 +49,13 @@ N26_HELIOSTACK = GridSurvey(
         "comp": "comp",
     },
     detection_defaults={"survey": "N26", "block": "N26"},
+    surveys=("N26",),
     paper_reference_jd=2452672.8585,
     rate_cut_min_arcsec_hr=0.05,
     rate_cut_max_arcsec_hr=6.4,
-    detections_relpath="data/n26_detections.csv",
-    detections_full_name="N26-free-cla_m.detections-full",
+    detections_relpath="characterization/N26/N26.csv",
+    detections_full_name="characterization/N26/N26.detections-full",
+    results_name="characterization/N26/N26.bias.csv",
     check_detected_title="detected flag≥4 (single 15-day stack)",
     bias_method="aq_grid",
 )
