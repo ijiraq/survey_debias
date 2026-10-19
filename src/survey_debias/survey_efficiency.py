@@ -535,8 +535,9 @@ def overlap_efficiency(plants: PlantTable, blocks_a: dict, overlap: OverlapTable
     keep_a = cut.mask(plants)
     eps = np.zeros(len(h))
     boot = np.zeros((n_boot, len(h)))
-    rows = overlap.index[overlap.in_b]
-    sub_b = np.flatnonzero(overlap.in_b)
+    in_b = overlap.in_b & np.isin(overlap.block_b.astype(str), list(blocks_b))
+    rows = overlap.index[in_b]
+    sub_b = np.flatnonzero(in_b)
     for name, block in blocks_a.items():
         n_b = int((plants.block == name).sum())
         pick = (plants.block[rows] == name) & keep_a[rows]
@@ -560,6 +561,50 @@ def overlap_efficiency(plants: PlantTable, blocks_a: dict, overlap: OverlapTable
             "colours": f"{colour_a:+.3f} {colour_b:+.3f} (filter - model band)",
             "n_both": int(overlap.in_b.sum()), "cut": cut.describe()}
     return EfficiencyTable(f"{overlap.survey_a}x{overlap.survey_b}", "model", h, eps, boot, meta)
+
+
+def check_detections(char_root, survey: str, n_per_block: int = 30, h_offset: float = -1.5,
+                     seed: int = 42) -> dict:
+    """Recovery of each block's own release detections by its characterization.
+
+    Each object's catalogue orbit is run through the real characterization at
+    its discovery epoch, ``h_offset`` mag brighter than its Hsur so that the
+    efficiency is near its plateau; a block whose characterization rejects
+    its own objects (a wrong rate cut, footprint or epoch) recovers few.
+    Returns ``{block: (recovered, tried, median motion angle [deg])}``.
+    """
+    from ossssim.color import PhotSpec
+
+    from .detections_io import BLOCK_PREFIXES, assign_block, read_detections_file
+    from .grid_bias_run import GridBiasSimulator, attributed_to
+
+    char_root = Path(char_root)
+    blocks = load_survey_blocks(char_root, survey)
+    sim = GridBiasSimulator(survey, blocks, PhotSpec(), next(iter(blocks.values())).filter,
+                            seed=seed)
+    rows = read_detections_file(char_root / survey / f"{survey}.detections")
+    by_block: dict = {}
+    for r in rows:
+        if not (r["a"] > 0 and 0 <= r["e"] < 1):
+            continue
+        b = assign_block(r["object"], blocks, BLOCK_PREFIXES.get(survey),
+                         r["RAdeg"], r["DEdeg"], r["JD"])
+        by_block.setdefault(b, []).append(r)
+    out = {}
+    for b, members in sorted(by_block.items()):
+        hit, angles = 0, []
+        for r in members[:n_per_block]:
+            n = 0.9856076686 / r["a"] ** 1.5
+            M = (n * (r["JD"] - (r["tperi"] + 2400000.5))) % 360.0
+            res = sim.epoch_rows(r["a"], r["e"], r["i"], r["Omega"], r["omega"], M,
+                                 r["Hsur"] + h_offset, epoch_jd=r["JD"])
+            hit += attributed_to(res, blocks[b])
+            if float(res[0]["d_ra"]) or float(res[0]["d_dec"]):
+                angles.append(math.degrees(math.atan2(float(res[0]["d_dec"]),
+                                                      float(res[0]["d_ra"]))))
+        out[b] = (hit, min(len(members), n_per_block),
+                  float(np.median(angles)) if angles else float("nan"))
+    return out
 
 
 def _range(lo, hi):
@@ -600,10 +645,21 @@ def main(argv=None) -> int:
     p.add_argument("--colour-group", default="cold", help="spectral group (default cold)")
     p.add_argument("--model-band", default="r")
     p.add_argument("--exclude-block", action="append", default=[], metavar="BLOCK",
-                   help="leave BLOCK out of eps (its detections must be left out of the fit)")
+                   help="leave BLOCK out of eps, and out of the other survey in overlaps (its "
+                        "detections must be left out of the fit)")
+    p.add_argument("--check-detections", action="store_true",
+                   help="only report how many of each block's release detections its "
+                        "characterization recovers")
     args = p.parse_args(argv)
 
     char_root = Path(args.root) / "characterization"
+    if args.check_detections:
+        for survey in args.survey:
+            for b, (hit, tried, angle) in check_detections(char_root, survey).items():
+                flag = "  <-- low" if tried and hit < 0.3 * tried else ""
+                print(f"{survey}/{b}: {hit}/{tried} release detections recovered, "
+                      f"median motion angle {angle:.1f} deg{flag}")
+        return 0
     components = tuple(c for c in args.components.split(",") if c)
     model = None
     cut = SampleCut(args.i_max, _range(args.r_min, args.r_max), _range(args.a_min, args.a_max))
@@ -642,7 +698,8 @@ def main(argv=None) -> int:
 def write_overlap(args, char_root, survey, plants, blocks, other, cut) -> None:
     from .colours import ColourMap, load_colours
 
-    blocks_b = load_survey_blocks(char_root, other, use_ossssim=False)
+    blocks_b = {k: v for k, v in load_survey_blocks(char_root, other, use_ossssim=False).items()
+                if k not in set(args.exclude_block)}
     pairs = reachable_pairs(blocks, blocks_b)
     out = char_root / survey / f"eps_{args.tag}_x_{other}.csv"
     if not pairs:
