@@ -28,10 +28,12 @@ except ImportError:
 def fake_plants(survey, block, n, rng):
     in_field = rng.random(n) < 0.5
     mu = np.where(in_field, rng.uniform(16.0, 17.0, n), np.nan)
+    angles = rng.uniform(0, 360, (3, n))
     return se.PlantTable(
         survey, np.full(n, block), np.full(n, "coldl"), rng.uniform(42, 47, n),
         rng.uniform(0, 0.1, n), rng.uniform(0, 8, n), rng.uniform(38, 50, n),
-        np.zeros(n), rng.uniform(0, 1e-5, n), in_field, mu, np.where(in_field, 3.0, np.nan),
+        *angles, np.full(n, 2459969.3), rng.uniform(0, 1e-5, n), in_field, mu,
+        np.where(in_field, 3.0, np.nan),
     )
 
 
@@ -105,6 +107,42 @@ class Efficiency(unittest.TestCase):
         np.testing.assert_allclose(back.eps, cut.eps, rtol=1e-5)
         self.assertEqual(back.meta["cut"], "i < 4 deg")
         np.testing.assert_array_equal(again.block, plants.block)
+
+
+class Overlaps(unittest.TestCase):
+    def _blocks(self, tmp, survey, ra, jd):
+        make_survey(Path(tmp), survey, [f"0.5 0.5 {ra} 0.0 {jd} 0.9 500 b.eff\n"], {"b": "r"})
+        return load_survey_blocks(Path(tmp) / "characterization", survey, False)
+
+    def test_reachable_pairs_use_cold_drift(self):
+        with short_tempdir() as tmp:
+            a = self._blocks(tmp, "A", 100.0, 2457000.5)
+            near = self._blocks(tmp, "B", 110.0, 2457000.5 + 5 * 365.25)
+            far = self._blocks(tmp, "C", 160.0, 2457000.5 + 5 * 365.25)
+        self.assertEqual(se.reachable_pairs(a, near), [("b", "b")])
+        self.assertEqual(se.reachable_pairs(a, far), [])
+
+    def test_overlap_is_the_product_of_both_selections(self):
+        rng = np.random.default_rng(4)
+        with short_tempdir() as tmp:
+            a = self._blocks(tmp, "A", 100.0, 2457000.5)
+            b = self._blocks(tmp, "B", 100.0, 2457000.5)
+        plants = fake_plants("A", "b", 200, rng)
+        idx = np.flatnonzero(plants.in_field)
+        in_b = rng.random(idx.size) < 0.5
+        ov = se.OverlapTable("A", "B", idx, in_b, np.where(in_b, "b", ""),
+                             np.where(in_b, plants.mu[idx] + 0.1, np.nan),
+                             np.where(in_b, 3.0, np.nan))
+        table = se.overlap_efficiency(plants, a, ov, b, 0.0, 0.0, h_grid=(8.0, 9.0, 1.0),
+                                      n_boot=0)
+        sel = a["b"].selection
+        j = idx[in_b]
+        for k, h in enumerate(table.h):
+            s = [sel.measured_selection(np.array([h + plants.mu[x]]), 3.0)[0]
+                 * sel.measured_selection(np.array([h + plants.mu[x] + 0.1]), 3.0)[0] for x in j]
+            self.assertAlmostEqual(table.eps[k], float(np.sum(plants.w[j] * s)) / 200, delta=1e-12)
+        single = se.survey_efficiency(plants, a, h_grid=(8.0, 9.0, 1.0), n_boot=0)
+        self.assertTrue(np.all(table.eps <= single.eps))
 
 
 @unittest.skipUnless(HAVE_OSSSSIM, "needs ossssim")

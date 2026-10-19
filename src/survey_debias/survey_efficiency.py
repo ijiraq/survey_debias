@@ -161,12 +161,18 @@ def make_unit_characterization(char_root, survey: str, work_dir) -> Path:
 # Geometry pass
 
 
-PLANT_FIELDS = ("block", "comp", "a", "e", "i", "r", "beta", "w", "in_field", "mu", "rate")
+PLANT_FIELDS = ("block", "comp", "a", "e", "i", "r", "node", "peri", "M", "epoch", "w",
+                "in_field", "mu", "rate")
 
 
 @dataclass
 class PlantTable:
-    """Aimed plants of one survey (all blocks), with what eps needs."""
+    """Aimed plants of one survey (all blocks), with what eps needs.
+
+    (a, e, i, node, peri, M) at ``epoch`` [JD] are the aimed elements (NaN
+    angles when the aimed position is unreachable), so the same plants can be
+    run through another survey's characterization.
+    """
 
     survey: str
     block: np.ndarray
@@ -175,7 +181,10 @@ class PlantTable:
     e: np.ndarray
     i: np.ndarray
     r: np.ndarray
-    beta: np.ndarray
+    node: np.ndarray
+    peri: np.ndarray
+    M: np.ndarray
+    epoch: np.ndarray
     w: np.ndarray            # P_geom for the block's aimed box (0 if not reachable)
     in_field: np.ndarray     # Detos1 flag 4 in the block on the unit-efficiency copy
     mu: np.ndarray           # m - H at detection (NaN when not in the field)
@@ -218,7 +227,8 @@ def plant_block(sim, block: Block, model: ModelPopulation, n_plants: int, seed: 
     rng = np.random.default_rng(seed)
     sampler = _TileSampler(block)
     area = block.aim_area_deg2
-    out = {k: np.full(n_plants, np.nan) for k in ("a", "e", "i", "r", "beta", "w", "mu", "rate")}
+    out = {k: np.full(n_plants, np.nan)
+           for k in ("a", "e", "i", "r", "node", "peri", "M", "epoch", "w", "mu", "rate")}
     comp = np.empty(n_plants, dtype=object)
     in_field = np.zeros(n_plants, dtype=bool)
     H = 5.0
@@ -236,6 +246,7 @@ def plant_block(sim, block: Block, model: ModelPopulation, n_plants: int, seed: 
         inc_el, node, peri, M = el
         w = geometric_prob_for_aimed(a, e, inc_el, node, peri, M, area_deg2=area)
         out["w"][j] = w
+        out["node"][j], out["peri"][j], out["M"][j], out["epoch"][j] = node, peri, M, tile.jd
         if w <= 0.0:
             continue
         rows = sim.epoch_rows(a, e, inc_el, node, peri, M, H, epoch_jd=tile.jd)
@@ -419,6 +430,138 @@ def geometry_pass(char_root, survey: str, model: ModelPopulation, n_plants: int,
             shutil.rmtree(work, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# Overlaps between surveys
+
+
+COLD_DRIFT_DEG_PER_YR = 1.6   # cold classical sky motion bound (~1.3 deg/yr) with margin
+
+
+def _block_centre(block: Block) -> tuple[float, float, float]:
+    tiles = block.tiles[0]
+    ra = float(np.mean([t.ra_deg for t in tiles]))
+    dec = float(np.mean([t.dec_deg for t in tiles]))
+    return ra, dec, float(np.mean([t.jd for t in tiles]))
+
+
+def _block_radius(block: Block) -> float:
+    ra, dec, _ = _block_centre(block)
+    from .detections_io import _angular_sep_deg
+
+    return max(_angular_sep_deg(ra, dec, t.ra_deg, t.dec_deg)
+               + 0.5 * math.hypot(t.width_deg, t.height_deg) for t in block.tiles[0])
+
+
+def reachable_pairs(blocks_a: dict, blocks_b: dict, margin_deg: float = 3.0) -> list:
+    """Block pairs whose fields a cold object could occupy at both epochs."""
+    from .detections_io import _angular_sep_deg
+
+    pairs = []
+    for na, a in blocks_a.items():
+        ra_a, dec_a, jd_a = _block_centre(a)
+        for nb, b in blocks_b.items():
+            ra_b, dec_b, jd_b = _block_centre(b)
+            reach = (COLD_DRIFT_DEG_PER_YR * abs(jd_b - jd_a) / 365.25 + margin_deg
+                     + _block_radius(a) + _block_radius(b))
+            if _angular_sep_deg(ra_a, dec_a, ra_b, dec_b) <= reach:
+                pairs.append((na, nb))
+    return pairs
+
+
+@dataclass
+class OverlapTable:
+    """A's in-field plants through B: in B's field, B's block, mu and rate there."""
+
+    survey_a: str
+    survey_b: str
+    index: np.ndarray        # rows of A's plant table that were run
+    in_b: np.ndarray
+    block_b: np.ndarray
+    mu_b: np.ndarray
+    rate_b: np.ndarray
+
+
+def run_through(plants: PlantTable, char_root, survey_b: str, seed: int = 42,
+                work_dir=None) -> OverlapTable:
+    """Run A's in-field plants (stored elements) through B's unit-efficiency copy."""
+    from ossssim.color import PhotSpec
+
+    from .grid_bias_run import GridBiasSimulator, attributed_to
+
+    index = np.flatnonzero(plants.in_field)
+    out = OverlapTable(plants.survey, survey_b, index, np.zeros(index.size, dtype=bool),
+                       np.full(index.size, "", dtype=object), np.full(index.size, np.nan),
+                       np.full(index.size, np.nan))
+    if index.size == 0:
+        return out
+    own = work_dir is None
+    work = Path(tempfile.mkdtemp(prefix="sdovl", dir="/tmp")) if own else Path(work_dir)
+    try:
+        unit_root = make_unit_characterization(char_root, survey_b, work)
+        blocks = load_survey_blocks(unit_root, survey_b, use_ossssim=True)
+        sim = GridBiasSimulator(survey_b, blocks, PhotSpec(), "r", seed=seed)
+        H = 5.0
+        for n, j in enumerate(index):
+            rows = sim.epoch_rows(plants.a[j], plants.e[j], plants.i[j], plants.node[j],
+                                  plants.peri[j], plants.M[j], H, epoch_jd=plants.epoch[j])
+            for name, block in blocks.items():
+                if attributed_to(rows, block):
+                    out.in_b[n] = True
+                    out.block_b[n] = name
+                    out.mu_b[n] = float(rows[0]["m_int"].value) - H
+                    out.rate_b[n] = _row_rate(rows[0])
+                    break
+    finally:
+        if own:
+            shutil.rmtree(work, ignore_errors=True)
+    print(f"  {plants.survey} through {survey_b}: {int(out.in_b.sum())} of "
+          f"{index.size} in-field plants also in {survey_b}'s fields "
+          f"(blocks: {sorted(set(out.block_b[out.in_b]))})", flush=True)
+    return out
+
+
+def overlap_efficiency(plants: PlantTable, blocks_a: dict, overlap: OverlapTable,
+                       blocks_b: dict, colour_a: float, colour_b: float,
+                       cut: SampleCut | None = None, h_grid=H_GRID, n_boot: int = 32,
+                       seed: int = 0) -> EfficiencyTable:
+    """eps_{A and B}(H) in the model band: found by both surveys.
+
+    ``colour_a``, ``colour_b`` are each survey's (filter - model band) mean
+    colour; the product of the two selections is taken per plant.
+    """
+    cut = cut or SampleCut()
+    h = np.arange(h_grid[0], h_grid[1] + 0.5 * h_grid[2], h_grid[2])
+    rng = np.random.default_rng(seed)
+    keep_a = cut.mask(plants)
+    eps = np.zeros(len(h))
+    boot = np.zeros((n_boot, len(h)))
+    rows = overlap.index[overlap.in_b]
+    sub_b = np.flatnonzero(overlap.in_b)
+    for name, block in blocks_a.items():
+        n_b = int((plants.block == name).sum())
+        pick = (plants.block[rows] == name) & keep_a[rows]
+        if not pick.any():
+            continue
+        j, k = rows[pick], sub_b[pick]
+        sel_a = block.selection
+        s = np.empty((j.size, len(h)))
+        for n in range(j.size):
+            sel_b = blocks_b[overlap.block_b[k[n]]].selection
+            m_a = h + colour_a + plants.mu[j[n]]
+            m_b = h + colour_b + overlap.mu_b[k[n]]
+            s[n] = (sel_a.measured_selection(m_a, float(plants.rate[j[n]]))
+                    * sel_b.measured_selection(m_b, float(overlap.rate_b[k[n]])))
+        w = plants.w[j]
+        eps += (w @ s) / n_b
+        if n_boot:
+            pw = rng.poisson(1.0, size=(n_boot, w.size)) * w[None, :]
+            boot += (pw @ s) / n_b
+    meta = {"overlap": f"{overlap.survey_a} and {overlap.survey_b}",
+            "colours": f"{colour_a:+.3f} {colour_b:+.3f} (filter - model band)",
+            "n_both": int(overlap.in_b.sum()), "cut": cut.describe()}
+    return EfficiencyTable(f"{overlap.survey_a}x{overlap.survey_b}", "model", h, eps, boot, meta)
+
+
 def _range(lo, hi):
     if lo is None and hi is None:
         return None
@@ -449,6 +592,15 @@ def main(argv=None) -> int:
     p.add_argument("--a-max", type=float, default=None, help="sample cut: a < A_MAX [au]")
     p.add_argument("--reuse", action="store_true",
                    help="reuse an existing plant table instead of planting again")
+    p.add_argument("--overlap-with", action="append", default=[], metavar="SURVEY",
+                   help="also write eps for objects found by both this survey and SURVEY "
+                        "(eps_{tag}_x_{SURVEY}.csv, model band)")
+    p.add_argument("--colour-file", default=None,
+                   help="colours for the overlap (default <root>/colour.toml)")
+    p.add_argument("--colour-group", default="cold", help="spectral group (default cold)")
+    p.add_argument("--model-band", default="r")
+    p.add_argument("--exclude-block", action="append", default=[], metavar="BLOCK",
+                   help="leave BLOCK out of eps (its detections must be left out of the fit)")
     args = p.parse_args(argv)
 
     char_root = Path(args.root) / "characterization"
@@ -469,8 +621,11 @@ def main(argv=None) -> int:
             plants.save(plants_path)
             print(f"wrote {plants_path}")
         blocks = load_survey_blocks(char_root, survey, use_ossssim=False)
+        excluded = [b for b in args.exclude_block if b in blocks]
+        blocks = {k: v for k, v in blocks.items() if k not in excluded}
         meta = {"model": args.model, "components": ",".join(components),
-                "plants_per_block": args.plants, "seed": args.seed}
+                "plants_per_block": args.plants, "seed": args.seed,
+                "excluded_blocks": ",".join(excluded) or "none"}
         table = survey_efficiency(plants, blocks, cut, n_boot=args.boot, seed=args.seed,
                                   meta=meta)
         out = char_root / survey / f"eps_{args.tag}.csv"
@@ -479,7 +634,36 @@ def main(argv=None) -> int:
         half = table.h[np.flatnonzero(table.eps >= 0.5 * peak)[-1]] if peak > 0 else float("nan")
         print(f"wrote {out}: filter {table.filter}, peak eps {peak:.3e}, "
               f"half of peak at H_{table.filter} = {half:.2f}, cut {cut.describe()}")
+        for other in args.overlap_with:
+            write_overlap(args, char_root, survey, plants, blocks, other, cut)
     return 0
+
+
+def write_overlap(args, char_root, survey, plants, blocks, other, cut) -> None:
+    from .colours import ColourMap, load_colours
+
+    blocks_b = load_survey_blocks(char_root, other, use_ossssim=False)
+    pairs = reachable_pairs(blocks, blocks_b)
+    out = char_root / survey / f"eps_{args.tag}_x_{other}.csv"
+    if not pairs:
+        print(f"  {survey} and {other}: no block pair a cold object can reach at both "
+              f"epochs; no overlap file")
+        if out.exists():
+            out.unlink()
+        return
+    print(f"  {survey} and {other}: {len(pairs)} reachable block pair(s)")
+    colour_path = Path(args.colour_file) if args.colour_file else Path(args.root) / "colour.toml"
+    photspec, _ = load_colours(colour_path)
+    colours = ColourMap(photspec, args.model_band)
+    group = args.colour_group
+    filt_a = next(iter(blocks.values())).filter
+    filt_b = next(iter(blocks_b.values())).filter
+    overlap = run_through(plants, char_root, other, seed=args.seed)
+    table = overlap_efficiency(plants, blocks, overlap, blocks_b,
+                               colours.colour(filt_a, group), colours.colour(filt_b, group),
+                               cut, n_boot=args.boot, seed=args.seed)
+    table.save(out)
+    print(f"wrote {out}: peak eps(both) {float(table.eps.max()):.3e}")
 
 
 if __name__ == "__main__":
