@@ -23,6 +23,7 @@ fit = ["scipy", "emcee", "corner"]
 survey_debias = "survey_debias.cli:main"
 survey_debias_hfit = "survey_debias.hfit_cli:main"
 survey_debias_detections = "survey_debias.detections_io:main"
+survey_debias_eff = "survey_debias.survey_efficiency:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
