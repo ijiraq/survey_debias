@@ -58,7 +58,7 @@ def _read_csv(path) -> list[dict]:
 
 
 def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[dict]:
-    """(name, block, mag, d_bary, d_err) rows of one survey's sample."""
+    """(name, block, mag, d_bary, d_err, h, i) rows of one survey's sample."""
     name = spec["name"]
     fmt = spec.get("format", "csv")
     if fmt == "release":
@@ -70,11 +70,12 @@ def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[d
         raw = detections_io.convert(char_root, name, cut, spec.get("detections") and
                                     root / spec["detections"])
         rows = [{"name": r["name"], "block": r["block"], "mag": float(r["mag"]),
-                 "d_bary": float(r["d_bary"]), "d_err": math.nan, "h": float(r["Hsur"])}
+                 "d_bary": float(r["d_bary"]), "d_err": math.nan, "h": float(r["Hsur"]),
+                 "i": float(r["i"])}
                 for r in raw if r["comp"] == "cold"]
     elif fmt == "csv":
         cols = {"mag": "mag", "d_bary": "d_bary", "name": "name", "block": "block",
-                "d_bary_err": "d_bary_err", "h": None, **spec.get("columns", {})}
+                "d_bary_err": "d_bary_err", "h": None, "i": "i", **spec.get("columns", {})}
         select = spec.get("select", {})
         rows = []
         for r in _read_csv(root / spec["detections"]):
@@ -86,10 +87,12 @@ def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[d
                 raise ValueError(f"{name}: no block column and several blocks")
             err = r.get(cols["d_bary_err"], "")
             h = r.get(cols["h"], "") if cols["h"] else ""
+            inc = r.get(cols["i"], "")
             rows.append({"name": r[cols["name"]], "block": block,
                          "mag": float(r[cols["mag"]]), "d_bary": float(r[cols["d_bary"]]),
                          "d_err": float(err) if err not in ("", None) else math.nan,
-                         "h": float(h) if h not in ("", None) else math.nan})
+                         "h": float(h) if h not in ("", None) else math.nan,
+                         "i": float(inc) if inc not in ("", None) else math.nan})
     else:
         raise ValueError(f"{name}: format must be 'csv' or 'release', not {fmt!r}")
     excluded = set(spec.get("exclude_blocks", []))
@@ -167,7 +170,8 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
         if excl != eps_excl:
             raise ValueError(f"{name}: fit excludes {sorted(excl)} but eps_{tag}.csv excludes "
                              f"{sorted(eps_excl)}; rerun survey_debias_eff --exclude-block")
-        term = SurveyTerm(name, filt, like, eps, colours.colour(filt, group))
+        term = SurveyTerm(name, filt, like, eps, colours.colour(filt, group),
+                          inc=np.array([r["i"] for r in rs])[like.index])
         terms.append(term)
         info["surveys"][name] = {"filter": filt, "n": like.n, "colour": term.colour,
                                  "h_source": "catalogue" if np.all(np.isfinite(h_cat))
@@ -205,7 +209,79 @@ def _quantiles(x):
     return {"median": float(q[1]), "minus": float(q[1] - q[0]), "plus": float(q[2] - q[1])}
 
 
-def write_plots(out_dir: Path, like: JointLikelihood, fit, samples) -> list[Path]:
+HT_DR, HT_DI = 1.0, 0.5   # (r, i) window around a detection for its bias [au, deg]
+
+
+def _cut_from_meta(text: str):
+    """SampleCut from an eps table's ``cut`` description (survey_efficiency.SampleCut)."""
+    import re
+
+    from .survey_efficiency import SampleCut
+
+    cut = SampleCut()
+    m = re.search(r"i < ([0-9.]+) deg", text or "")
+    if m:
+        cut.i_max = float(m.group(1))
+    m = re.search(r"([0-9.]+) < r < ([0-9.]+) au", text or "")
+    if m:
+        cut.r_range = (float(m.group(1)), float(m.group(2)))
+    m = re.search(r"([0-9.]+) < a < ([0-9.]+) au", text or "")
+    if m:
+        cut.a_range = (float(m.group(1)), float(m.group(2)))
+    return cut
+
+
+def debiased_cumulative(like: JointLikelihood, char_root: Path, theta, tag: str = "cold"
+                        ) -> dict:
+    """Per survey: (H_r, weight) with weight = 1 / (union bias x cut fraction).
+
+    A detection's bias is P(found by any block of its survey | its r, i, H) for
+    the cold model, from the survey's plant table (plants within HT_DR au and
+    HT_DI deg, weighted by w 1(in field) S_bar). sum 1/bias counts the cold
+    objects inside the survey's cut; dividing by the model fraction of cold
+    objects that pass the cut makes each survey estimate the whole population,
+    like N(<H). H_r is the catalogue H less the survey's fitted mean colour.
+    """
+    from .survey_efficiency import PlantTable
+
+    _, _, delta = like.unpack(theta)
+    out = {}
+    for term in like.surveys:
+        path = char_root / term.name / f"plants_{tag}.npz"
+        if not path.is_file() or term.inc is None or not np.all(np.isfinite(term.inc)):
+            continue
+        plants = PlantTable.load(path)
+        frac = float(_cut_from_meta(term.eps.meta.get("cut", "")).mask(plants).mean())
+        s = term.like.sample
+        groups = list(term.like.selections.items())
+        by_block = {g: plants.block == g.split("/", 1)[1] for g, _ in groups}
+        weights = np.full(len(s), np.nan)
+        for k in range(len(s)):
+            near = (np.abs(plants.r - s.d[k]) < HT_DR) & (np.abs(plants.i - term.inc[k]) < HT_DI)
+            bias = 0.0
+            for g, sel in groups:
+                window = near & by_block[g]
+                n = int(window.sum())
+                use = window & plants.in_field
+                if n == 0 or not use.any():
+                    continue
+                m_t = s.h[k] + plants.mu[use]
+                rate = np.round(plants.rate[use], 1)
+                total = 0.0
+                for rv in np.unique(rate):
+                    pick = rate == rv
+                    total += float(np.sum(plants.w[use][pick]
+                                          * sel.measured_selection(m_t[pick], float(rv))))
+                bias += total / n
+            if bias > 0.0:
+                weights[k] = 1.0 / (bias * frac)
+        colour = like.colour_of(term, delta)
+        out[term.name] = (s.h - (0.0 if term.filter == like.model_band else colour), weights)
+    return out
+
+
+def write_plots(out_dir: Path, like: JointLikelihood, fit, samples, debiased=None
+                ) -> list[Path]:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -231,21 +307,34 @@ def write_plots(out_dir: Path, like: JointLikelihood, fit, samples) -> list[Path
     plt.close(fig)
     written.append(path)
 
-    if like.form == "tapered" and np.any(np.isfinite(fit.profile_loglike)):
+    prof = np.asarray(fit.profile_loglike, dtype=float)
+    ok = np.isfinite(prof) & (prof > -1e299)
+    if like.form == "tapered" and ok.any():
         fig, ax = plt.subplots(figsize=(5.5, 3.8))
-        rel = fit.profile_loglike - np.nanmax(fit.profile_loglike)
-        ax.plot(fit.profile_alpha, rel, color="#1f4e79", lw=2.0)
+        alpha = np.asarray(fit.profile_alpha, dtype=float)
+        rel = prof - prof[ok].max()
+        if not ok.all():
+            # Profiles from fits with the old H_o box (-30, 40): the small-alpha
+            # points next to the failed ones are pulled down by the box too.
+            ok &= np.cumsum(ok & (rel > -3.0)) > 0
+            ax.axvspan(-0.03, alpha[ok].min(), color="0.85", lw=0,
+                       label=r"cut by the H$_o$ bound of this fit; refit to fill")
+        ax.plot(alpha[ok], rel[ok], "o-", color="#1f4e79", lw=2.0, ms=3)
+        ax.axvline(like.bounds()["alpha"][0], color="0.4", lw=1, ls="--",
+                   label=r"$\alpha$ lower bound (current code)")
         ax.axhline(-0.5, color="0.6", ls=":")
-        ax.set_ylim(-8, 0.5)
+        ax.set_xlim(-0.03, 0.7)
+        ax.set_ylim(-3.0, 0.5)
         ax.set_xlabel(r"faint-end slope $\alpha$")
         ax.set_ylabel(r"profile $\ln L - \max\ln L$")
+        ax.legend(frameon=False, fontsize=8, loc="lower right")
         fig.tight_layout()
         path = out_dir / "joint_profile_alpha.png"
         fig.savefig(path, dpi=150)
         plt.close(fig)
         written.append(path)
 
-    fig, ax = plt.subplots(figsize=(5.8, 4.0))
+    fig, ax = plt.subplots(figsize=(7.0, 4.8))
     lo, hi = like.h_r_range
     hg = np.linspace(lo - 1.0, hi + 0.5, 300)
 
@@ -262,10 +351,19 @@ def write_plots(out_dir: Path, like: JointLikelihood, fit, samples) -> list[Path
         q = np.percentile(curves, [16, 84], axis=0)
         ax.fill_between(hg, q[0], q[1], color="#1f4e79", alpha=0.25, label="68% posterior")
     ax.plot(hg, cum(fit.theta), color="#1f4e79", lw=2.0, label="MLE")
+    markers = "osD^v<>ph"
+    for k, (name, (h, w)) in enumerate((debiased or {}).items()):
+        good = np.isfinite(w)
+        if not good.any():
+            continue
+        order = np.argsort(h[good])
+        ax.step(h[good][order], np.cumsum(w[good][order]), where="post", lw=1.0,
+                marker=markers[k % len(markers)], ms=3, alpha=0.8,
+                label=f"{name} (sum 1/bias, n={int(good.sum())})")
     ax.set_yscale("log")
     ax.set_xlabel(f"$H_{{{like.model_band}}}$")
     ax.set_ylabel(r"$N(<H)$, whole cold population")
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, fontsize=7, loc="upper left")
     fig.tight_layout()
     path = out_dir / "joint_cumulative.png"
     fig.savefig(path, dpi=150)
@@ -293,6 +391,10 @@ def main(argv=None) -> int:
     p.add_argument("--burn", type=int, default=1000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no-mcmc", action="store_true")
+    p.add_argument("--replot", action="store_true",
+                   help="only redraw the plots from joint_summary.json and joint_samples.csv")
+    p.add_argument("--no-debiased", action="store_true",
+                   help="leave the sum 1/bias points off the cumulative plot")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = p.parse_args(argv)
 
@@ -301,6 +403,10 @@ def main(argv=None) -> int:
     like.form = args.form
     out_dir = Path(args.out_dir) if args.out_dir else base / f"joint_{Path(args.config).stem}"
     out_dir.mkdir(parents=True, exist_ok=True)
+    char_root = Path(info["root"]) / "characterization"
+    tag = cfg["joint"].get("eps_tag", "cold")
+    if args.replot:
+        return replot(out_dir, like, char_root, tag, not args.no_debiased)
     for t in like.surveys:
         print(f"{t.name}: {t.n} detections in {t.filter}, colour {t.colour:+.2f}, "
               f"H_{t.filter} {t.like.sample.h.min():.2f}-{t.like.sample.h.max():.2f}"
@@ -351,8 +457,36 @@ def main(argv=None) -> int:
     text = summary_text(summary)
     (out_dir / "joint_summary.txt").write_text(text)
     print(text)
-    for path in write_plots(out_dir, like, fit, samples):
+    debiased = None if args.no_debiased else debiased_cumulative(like, char_root, fit.theta, tag)
+    for path in write_plots(out_dir, like, fit, samples, debiased):
         print(f"wrote {path}")
+    return 0
+
+
+def replot(out_dir: Path, like: JointLikelihood, char_root: Path, tag: str,
+           with_debiased: bool = True) -> int:
+    """Redraw the plots of an earlier run without fitting."""
+    from types import SimpleNamespace
+
+    summary = json.loads((out_dir / "joint_summary.json").read_text())
+    if summary["parameters"] != like.names:
+        raise ValueError(f"{out_dir}: parameters {summary['parameters']} do not match the "
+                         f"configuration's {like.names}")
+    like.form = summary.get("form", like.form)
+    theta = np.array([summary["mle"][n] for n in like.names])
+    prof = summary.get("alpha_profile", {})
+    fit = SimpleNamespace(theta=theta, profile_alpha=np.array(prof.get("alpha", [])),
+                          profile_loglike=np.array(prof.get("loglike", [])))
+    samples = None
+    path = out_dir / "joint_samples.csv"
+    if path.is_file():
+        samples = np.loadtxt(path, delimiter=",", skiprows=1)[:, : len(like.names)]
+    debiased = debiased_cumulative(like, char_root, theta, tag) if with_debiased else None
+    for name, (_, w) in (debiased or {}).items():
+        print(f"{name}: sum 1/bias over {int(np.isfinite(w).sum())} detections = "
+              f"{np.nansum(w):.4g}", flush=True)
+    for p in write_plots(out_dir, like, fit, samples, debiased):
+        print(f"wrote {p}")
     return 0
 
 

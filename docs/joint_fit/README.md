@@ -115,6 +115,20 @@ the surveys do not constrain the cold inclination width, which stays fixed at
 the OSSOS 1.0 model's; a wider sample cut (or HiLat's hot objects) would be
 needed to fit it.
 
+**The lower side of alpha in these fits is an artefact.** The fits above kept
+H_o inside (-30, 40). Because N(<H) = 10^(alpha (H - H_o)), the H_o that
+matches the counts goes as -log10(N/K)/alpha and leaves that box below
+alpha ~ 0.13, so the profile and the posteriors are cut there (the JWST + OSSOS
+fill-factor run ended at H_o = -30). The code now leaves H_o unbounded and
+allows alpha down to 0.001 with a profile grid from 0.005; refit to see the
+small-alpha side. The quoted lower errors on alpha, and the JWST + OSSOS MLE
+(0.165, on a flat plateau at the cut), will change.
+
+`survey_debias_joint --replot` redraws the plots from `joint_summary.json` and
+`joint_samples.csv` without fitting; the cumulative plot shows each survey's
+sum of 1/bias (union bias over its blocks from the plant tables, divided by the
+model fraction of cold objects inside its cut) over the fitted N(<H).
+
 The configurations and outputs are in `SurveyCharacterizations/joint/`
 (`cold_jwst_ossos.toml`, `cold_jwst_ossos_cfeps.toml`, `cold_all.toml`;
 `joint_<name>/joint_summary.{txt,json}`, samples and plots).

@@ -32,6 +32,9 @@ SIGMA_DELTA = 0.05
 SIGMA_C = 0.2
 COLOUR_NODES = 11
 MC_NODES = 7
+ALPHA_BOUNDS = (0.001, 2.0)
+# Profile grid in alpha: fine where the faint-end slope is measured, coarse above.
+PROFILE_ALPHAS = np.concatenate([np.linspace(0.005, 0.8, 33), [1.0, 1.3, 1.7]])
 SHAPE_NAMES = ("alpha", "beta", "h_b")
 
 
@@ -50,6 +53,7 @@ class SurveyTerm:
     eps: EfficiencyTable
     colour: float                       # cbar_f = filter - model band (cold mean)
     overlaps: list = field(default_factory=list)   # (higher-priority survey, eps table)
+    inc: np.ndarray | None = None       # detections' ecliptic inclination (for plots)
 
     @property
     def n(self) -> int:
@@ -93,8 +97,11 @@ class JointLikelihood:
     def bounds(self) -> dict:
         lo, hi = self.h_r_range
         b = dict(hfit.DEFAULT_PRIORS)
+        b["alpha"] = ALPHA_BOUNDS
         b["h_b"] = (lo - 6.0, hi + 5.0)
-        b["h_o"] = (-30.0, 40.0)
+        # H_o ~ -log10(N / K) / alpha runs away as alpha -> 0; a tight box on it
+        # would cut the small-alpha side of the likelihood.
+        b["h_o"] = (-1e6, 1e6)
         for f in self.filters:
             b[f"delta_{f}"] = (-6 * self.sigma_delta, 6 * self.sigma_delta)
         return b
@@ -237,7 +244,7 @@ def _with_h_o(like: JointLikelihood, shape, delta_vec):
     return np.concatenate([shape, [h_o], delta_vec])
 
 
-def fit_joint(like: JointLikelihood, n_profile: int = 25) -> JointFit:
+def fit_joint(like: JointLikelihood, alphas=PROFILE_ALPHAS) -> JointFit:
     """MLE: grid starts over the shape (H_o profiled), a profile in alpha, then a polish."""
     nd = len(like.filters)
     lo, hi = like.h_r_range
@@ -263,16 +270,16 @@ def fit_joint(like: JointLikelihood, n_profile: int = 25) -> JointFit:
         scale = [0.05] + [0.02] * nd
     else:
         starts = [np.concatenate([[a, b, hb], np.zeros(nd)])
-                  for a in (0.2, 0.4, 0.7) for b in (0.2, 0.6, 1.5)
+                  for a in (0.05, 0.2, 0.4, 0.7) for b in (0.2, 0.6, 1.5)
                   for hb in (lo, 0.5 * (lo + hi), hi)]
         scale = [0.05, 0.1, 0.5] + [0.02] * nd
     scored = sorted(starts, key=neg_free)[:6]
     best = min((_nm(neg_free, s, scale) for s in scored), key=lambda r: r.fun)
 
-    a_lo, a_hi = hfit.DEFAULT_PRIORS["alpha"]
-    alphas = np.geomspace(a_lo + 1e-3, a_hi - 1e-3, n_profile)
-    prof_ll = np.full(n_profile, -np.inf)
-    prof_th = np.zeros((n_profile, like.ndim))
+    a_lo, a_hi = like.bounds()["alpha"]
+    alphas = np.asarray([a for a in alphas if a_lo < a < a_hi], dtype=float)
+    prof_ll = np.full(len(alphas), -np.inf)
+    prof_th = np.zeros((len(alphas), like.ndim))
     if not exponential:
         warm = None
         fixed = [np.concatenate([[b, hb], np.zeros(nd)]) for b in (0.3, 1.9) for hb in (lo, hi)]
