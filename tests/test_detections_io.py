@@ -81,6 +81,24 @@ class Reader(unittest.TestCase):
         self.assertFalse(cut({"cl": "cla", "p": "m", "sh": "I", "i": 1.0}))
         self.assertFalse(cut({"cl": "cla", "p": "m", "sh": "S", "i": 5.0}))
 
+    def test_free_inclination_cut(self):
+        cut = detections_io.ColdCut(i_max=None, ifree_max=4.0)
+        row = {"cl": "cla", "p": "m", "sh": "S", "object": "nothing", "MPC": "",
+               "a": 44.0, "e": 0.05, "i": 4.6, "Omega": 90.0, "omega": 20.0}
+        ifree, source = detections_io.release_ifree(dict(row))
+        self.assertEqual(source, "huang2022_grid")
+        self.assertLess(ifree, 4.0)            # i = 4.6 near the forcing node is cold
+        self.assertTrue(cut(dict(row)))
+        self.assertFalse(cut({**row, "Omega": 270.0}))
+        self.assertEqual(cut.describe(), "cl in ('cla',), p in ('m',), i_free < 4 deg")
+
+    def test_free_inclination_from_huang_table(self):
+        ifree, source = detections_io.release_ifree({"object": "x", "MPC": "15760",
+                                                     "a": 44.0, "e": 0.0, "i": 9.0,
+                                                     "Omega": 0.0, "omega": 0.0})
+        self.assertEqual(source, "huang2022_table")
+        self.assertAlmostEqual(ifree, 2.7091)
+
     def test_duplicates_are_kept_in_the_priority_survey(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "Duplicates"

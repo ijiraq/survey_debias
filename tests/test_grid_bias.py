@@ -860,6 +860,25 @@ class DetectionReader(unittest.TestCase):
         self.assertNotIn("ifree", rows.computed_columns)
         self.assertIn("sin_ifree", rows.computed_columns)
 
+    def test_blank_ifree_cell_falls_back_to_omega0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_csv(Path(tmp), (
+                "name,a,e,i,ifree,d_bary,m_f150w2\n"
+                "J1,43.7,0.06,1.85,3.2,46.2,26.0\n"
+                "J2,43.7,0.06,1.85,,46.2,26.0\n"
+            ))
+            survey = dataclasses.replace(SURVEY, detection_columns={
+                "mag": "m_f150w2", "name": "name", "a": "a", "e": "e",
+                "i": "i", "ifree": "ifree", "d_bary": "d_bary",
+            })
+            rows = grid_bias.load_detections(path, survey)
+        self.assertAlmostEqual(rows[0]["ifree"], 3.2)
+        self.assertNotIn("ifree", rows[0]["_computed"])
+        self.assertAlmostEqual(
+            rows[1]["ifree"], grid_bias.compute_ifree(1.85, 0.0, 43.7),
+        )
+        self.assertIn("ifree", rows[1]["_computed"])
+
     def test_input_hx_is_kept_beside_computed_hx(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _write_csv(Path(tmp), (

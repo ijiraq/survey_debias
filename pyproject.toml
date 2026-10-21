@@ -29,6 +29,9 @@ survey_debias_joint = "survey_debias.joint_cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+survey_debias = ["data/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

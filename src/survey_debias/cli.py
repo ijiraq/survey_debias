@@ -84,7 +84,7 @@ def _describe_project(project, names) -> tuple[list, list[str]]:
             print(f"  {s}/{b.name}: filter {b.filter}, {b.n_epochs} epoch(s) "
                   f"(detection at {b.detections_required}), "
                   f"{len(b.tiles[0])} tile(s), {b.area_deg2:.4f} deg² "
-                  f"(sampled {b.aim_area_deg2:.4f} deg²)")
+                  f"(sampled {b.aim_area_deg2:.4f} deg² over {len(b.aim_tiles)} aim tile(s))")
             for t in b.tiles[0]:
                 obs = Path(b.char_dirs[0]) / t.observer
                 kind = "file" if obs.is_file() else "MPC code"

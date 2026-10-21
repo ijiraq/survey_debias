@@ -433,7 +433,10 @@ class Attribution(unittest.TestCase):
             est = compute_cell_bias(sim, block, bounds, seed=3, target=40,
                                     group="cold", max_aimed=200)
         self.assertEqual(est.n_detected, 40)
-        self.assertEqual(est.n_drawn, 80)
+        # Every second Detos1 call is this block's. n_drawn also counts aims at
+        # positions the orbit cannot reach (weight 0, no Detos1 call).
+        self.assertEqual(sim.calls, 80)
+        self.assertGreaterEqual(est.n_drawn, sim.calls)
         self.assertEqual(set(sim.comps), {"cold"})
         self.assertGreater(est.bias, 0.0)
         self.assertGreater(est.bias_se, 0.0)

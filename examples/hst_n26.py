@@ -45,6 +45,7 @@ N26_HELIOSTACK = GridSurvey(
         "a": "a",
         "e": "e",
         "i": "i",
+        "ifree": "ifree",
         "d_bary": "d_bary",
         "comp": "comp",
     },

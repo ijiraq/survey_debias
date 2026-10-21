@@ -736,6 +736,20 @@ class ConditionalLikelihood:
         idx = np.asarray(idx, dtype=int)
         return (idx[:, None] * self.n_nodes + np.arange(self.n_nodes)[None, :]).ravel()
 
+    def apply_h_window(self, window) -> None:
+        """Multiply the selection by ``window(H)``, H the true H in this sample's filter.
+
+        For a survey whose objects below some H belong to a higher-priority
+        survey (a complete catalogue) and are dropped from this sample: its
+        selection becomes S(m) * window(H). Applied once, in place.
+        """
+        wg = np.asarray(window(self.grid), dtype=float)
+        self.den *= wg[None, :]
+        self.num *= wg[None, :]
+        with np.errstate(divide="ignore"):
+            self.log_s_pt = self.log_s_pt + np.log(np.asarray(window(self.h_pt), dtype=float))
+        self._pit_cache = None
+
     def take(self, idx) -> "ConditionalLikelihood":
         """The likelihood for rows ``idx`` (a bootstrap resample), without retabulating."""
         idx = np.asarray(idx, dtype=int)

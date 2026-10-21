@@ -26,6 +26,20 @@ Configuration (TOML, paths relative to the file)::
     format = "release"                     # {survey}.detections via detections_io
     cold = { classes = ["cla"], parts = ["m"], i_max = 5.0 }
     exclude_blocks = ["2015BS"]
+
+    [[survey]]
+    name = "MPC"
+    format = "complete"                    # every object with catalogue H < h_lim
+    spec = "characterization/MPC/MPC.toml" # filter, h_lim, sigma_h, detections, duplicates
+    select = { comp = "cold" }
+    # h_lim = 5.25, sigma_h = 0.1          # optional overrides of the spec
+
+A complete survey must come before every other survey in ``priority``: it
+owns the objects below its limit. Its eps (``survey_debias_eff --complete``)
+is re-stepped at ``h_lim`` here, its overlaps with the other surveys are
+computed from their own eps tables, and the other surveys' conditional terms
+get the window 1 - P(below the limit | H). ``duplicates`` may be a list; a
+complete spec's ``duplicates_relpath`` is added to it.
 """
 from __future__ import annotations
 
@@ -41,9 +55,11 @@ import numpy as np
 from . import __version__, detections_io, hfit
 from .colours import ColourMap, load_colours
 from .grid_bias import geometric_h
-from .joint import SIGMA_C, SIGMA_DELTA, JointLikelihood, SurveyTerm, fit_joint, run_mcmc
+from .joint import (SIGMA_C, SIGMA_DELTA, CompleteSample, JointLikelihood, SurveyTerm,
+                    fit_joint, run_mcmc)
 from .pointings import load_survey_blocks, observer_icrf
-from .survey_efficiency import EfficiencyTable
+from .survey_efficiency import (CompleteSpec, EfficiencyTable, complete_efficiency,
+                                complete_overlap, complete_sigma)
 
 
 def load_config(path) -> tuple[dict, Path]:
@@ -57,16 +73,49 @@ def _read_csv(path) -> list[dict]:
     return list(csv.DictReader(lines))
 
 
+def complete_spec(spec: dict, root: Path) -> CompleteSpec:
+    """A ``format = "complete"`` survey's spec: its TOML, then the [[survey]] overrides."""
+    if spec.get("spec"):
+        cs = CompleteSpec.load(root / spec["spec"])
+    else:
+        cs = CompleteSpec(name=spec["name"], filter=spec["filter"], h_lim=float(spec["h_lim"]))
+    cs.name = spec["name"]
+    for key in ("filter", "h_lim", "sigma_h", "detections", "duplicates"):
+        if key in spec:
+            setattr(cs, key, spec[key] if key in ("filter", "detections", "duplicates")
+                    else float(spec[key]))
+    return cs
+
+
 def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[dict]:
     """(name, block, mag, d_bary, d_err, h, i) rows of one survey's sample."""
     name = spec["name"]
     fmt = spec.get("format", "csv")
+    if fmt == "complete":
+        cs = complete_spec(spec, root)
+        cols = {"name": "name", "h": "h", "i": "i", **cs.columns, **spec.get("columns", {})}
+        select = spec.get("select", {})
+        rows = []
+        for r in _read_csv(root / cs.detections):
+            if any(str(r.get(k, "")) != str(v) for k, v in select.items()):
+                continue
+            h = float(r[cols["h"]])
+            if not h < cs.h_lim:
+                continue
+            inc = r.get(cols["i"], "")
+            rows.append({"name": r[cols["name"]], "block": name, "mag": math.nan,
+                         "d_bary": math.nan, "d_err": math.nan, "h": h,
+                         "i": float(inc) if inc not in ("", None) else math.nan})
+        return rows
     if fmt == "release":
         cold = dict(spec.get("cold", {}))
+        ifree_max = cold.get("ifree_max")
+        i_max = cold.get("i_max", None if ifree_max is not None else 5.0)
         cut = detections_io.ColdCut(tuple(cold.get("classes", ("cla",))),
                                     tuple(cold.get("parts", ("m",))),
-                                    float(cold.get("i_max", 5.0)),
-                                    bool(cold.get("secure_only", False)))
+                                    None if i_max is None else float(i_max),
+                                    bool(cold.get("secure_only", False)),
+                                    None if ifree_max is None else float(ifree_max))
         raw = detections_io.convert(char_root, name, cut, spec.get("detections") and
                                     root / spec["detections"])
         rows = [{"name": r["name"], "block": r["block"], "mag": float(r["mag"]),
@@ -94,7 +143,7 @@ def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[d
                          "h": float(h) if h not in ("", None) else math.nan,
                          "i": float(inc) if inc not in ("", None) else math.nan})
     else:
-        raise ValueError(f"{name}: format must be 'csv' or 'release', not {fmt!r}")
+        raise ValueError(f"{name}: format must be 'csv', 'release' or 'complete', not {fmt!r}")
     excluded = set(spec.get("exclude_blocks", []))
     return [r for r in rows if r["block"] not in excluded]
 
@@ -118,16 +167,33 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
     tag = j.get("eps_tag", "cold")
     specs = cfg["survey"]
     priority = list(j.get("priority", [s["name"] for s in specs]))
+    sigma_c = float(sigma_c if sigma_c is not None else j.get("sigma_c", SIGMA_C))
+    rank = {s: k for k, s in enumerate(priority)}
 
-    blocks, rows = {}, {}
+    blocks, rows, complete = {}, {}, {}
     for spec in specs:
         name = spec["name"]
-        b = load_survey_blocks(char_root, name, use_ossssim=False)
-        blocks[name] = {k: v for k, v in b.items() if k not in set(spec.get("exclude_blocks", []))}
+        if spec.get("format") == "complete":
+            complete[name] = complete_spec(spec, root)
+            blocks[name] = {}
+        else:
+            b = load_survey_blocks(char_root, name, use_ossssim=False)
+            blocks[name] = {k: v for k, v in b.items()
+                            if k not in set(spec.get("exclude_blocks", []))}
         rows[name] = survey_rows(spec, root, char_root, blocks[name])
+    for name in complete:
+        later = [s["name"] for s in specs if s["name"] not in complete
+                 and rank.get(s["name"], 99) <= rank.get(name, 99)]
+        if later:
+            raise ValueError(f"{name} is a complete survey: put it before {later} in priority")
+    dup_files = j.get("duplicates") or []
+    dup_files = [dup_files] if isinstance(dup_files, str) else list(dup_files)
+    for cs in complete.values():
+        if cs.duplicates and cs.duplicates not in dup_files:
+            dup_files.append(cs.duplicates)
     dropped = {}
-    if j.get("duplicates"):
-        groups = detections_io.read_duplicates(root / j["duplicates"])
+    if dup_files:
+        groups = [g for f in dup_files for g in detections_io.read_duplicates(root / f)]
         drop = detections_io.drop_duplicates({s: [r["name"] for r in v] for s, v in rows.items()},
                                              groups, priority)
         for s, names in drop.items():
@@ -135,12 +201,22 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
                 rows[s] = [r for r in rows[s] if r["name"] not in names]
                 dropped[s] = sorted(names)
 
-    terms, info = [], {"root": str(root), "dropped_duplicates": dropped, "surveys": {}}
+    terms, info = [], {"root": str(root), "dropped_duplicates": dropped, "surveys": {},
+                       "duplicates": dup_files}
     for spec in specs:
         name = spec["name"]
         rs = rows[name]
         if not rs:
             raise ValueError(f"{name}: no detections in the sample")
+        if name in complete:
+            term = complete_term(complete[name], rs, char_root, tag, colours, group)
+            terms.append(term)
+            info["surveys"][name] = {"filter": term.filter, "n": term.n, "colour": term.colour,
+                                     "h_source": "catalogue (complete survey)",
+                                     "h_range": [float(term.like.h.min()), float(term.like.h.max())],
+                                     "h_lim": term.h_lim, "sigma_h": term.sigma_h,
+                                     "blocks": [], "eps": term.eps.meta}
+            continue
         filt = {v.filter for v in blocks[name].values()}
         if len(filt) != 1:
             raise ValueError(f"{name}: blocks use several filters {sorted(filt)}")
@@ -170,6 +246,8 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
         if excl != eps_excl:
             raise ValueError(f"{name}: fit excludes {sorted(excl)} but eps_{tag}.csv excludes "
                              f"{sorted(eps_excl)}; rerun survey_debias_eff --exclude-block")
+        if spec.get("format") == "release":
+            _check_cut(name, spec.get("cold", {}), eps, tag)
         term = SurveyTerm(name, filt, like, eps, colours.colour(filt, group),
                           inc=np.array([r["i"] for r in rs])[like.index])
         terms.append(term)
@@ -178,10 +256,21 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
                                  else "geometric (block pointing and observer)",
                                  "h_range": [float(h.min()), float(h.max())],
                                  "blocks": sorted(blocks[name]), "eps": eps.meta}
-    rank = {s: k for k, s in enumerate(priority)}
     for term in terms:
         for other in terms:
             if rank.get(other.name, 99) >= rank.get(term.name, 99):
+                continue
+            if other.kind == "complete":
+                sigma = complete_sigma(other.filter, term.filter, sigma_c, other.sigma_h)
+                spec_o = CompleteSpec(other.name, other.filter, other.h_lim, other.sigma_h)
+                table = complete_overlap(spec_o, term.eps, other.colour, term.colour, sigma)
+                term.overlaps.append((other.name, table))
+                info["surveys"][term.name].setdefault("overlaps", []).append(
+                    f"{other.name}: complete below {other.filter} {other.h_lim:g} (computed)")
+                if isinstance(term.like, hfit.ConditionalLikelihood):
+                    term.like.apply_h_window(_below_window(other, term, sigma))
+                    info["surveys"][term.name]["h_window"] = (
+                        f"1 - P({other.filter} < {other.h_lim:g}), sigma {sigma:.3f}")
                 continue
             for a, b in ((other.name, term.name), (term.name, other.name)):
                 path = char_root / a / f"eps_{tag}_x_{b}.csv"
@@ -192,10 +281,52 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
     like = JointLikelihood(
         terms,
         sigma_delta=float(sigma_delta if sigma_delta is not None else j.get("sigma_delta", SIGMA_DELTA)),
-        sigma_c=float(sigma_c if sigma_c is not None else j.get("sigma_c", SIGMA_C)),
+        sigma_c=sigma_c,
         model_band=model_band,
     )
     return like, info
+
+
+def _check_cut(name: str, cold: dict, eps: EfficiencyTable, tag: str) -> None:
+    """The release sample's i / i_free cut must be the one eps was computed with."""
+    ifree_max = cold.get("ifree_max")
+    i_max = cold.get("i_max", None if ifree_max is not None else 5.0)
+    have = _cut_from_meta(eps.meta.get("cut", ""))
+    for label, want, got in (("i", i_max, have.i_max), ("i_free", ifree_max, have.ifree_max)):
+        if (want is None) != (got is None) or (want is not None and abs(float(want) - got) > 1e-6):
+            raise ValueError(f"{name}: the sample cuts {label} < {want} but eps_{tag}.csv was "
+                             f"computed with cut '{eps.meta.get('cut', '')}'")
+
+
+def complete_term(cs: CompleteSpec, rs: list[dict], char_root: Path, tag: str,
+                  colours: ColourMap, group: str) -> SurveyTerm:
+    """SurveyTerm of a complete survey; its eps is re-stepped at ``cs.h_lim``."""
+    path = char_root / cs.name / f"eps_{tag}.csv"
+    stored = EfficiencyTable.load(path)
+    if stored.filter != cs.filter or "f_cut" not in stored.meta:
+        raise ValueError(f"{path}: not a complete-survey eps in {cs.filter!r}; run "
+                         f"survey_debias_eff --complete")
+    f_cut = float(stored.meta["f_cut"])
+    boot = stored.boot.max(axis=1) if len(stored.boot) else np.zeros(0)
+    meta = {k: v for k, v in stored.meta.items() if k not in ("complete", "sigma_h")}
+    eps = complete_efficiency(cs, f_cut, boot, meta)
+    names = np.array([r["name"] for r in rs])
+    h = np.array([r["h"] for r in rs])
+    return SurveyTerm(cs.name, cs.filter, CompleteSample(names, h), eps,
+                      colours.colour(cs.filter, group), inc=np.array([r["i"] for r in rs]),
+                      kind="complete", h_lim=cs.h_lim, sigma_h=cs.sigma_h)
+
+
+def _below_window(complete: SurveyTerm, term: SurveyTerm, sigma: float):
+    """1 - P(catalogue H of the complete survey < h_lim | true H in ``term``'s filter)."""
+    from scipy.special import ndtr
+
+    shift = complete.colour - term.colour
+
+    def window(h):
+        return 1.0 - ndtr((complete.h_lim - (np.asarray(h) + shift)) / sigma)
+
+    return window
 
 
 def summarize_counts(like: JointLikelihood, theta) -> dict:
@@ -219,9 +350,12 @@ def _cut_from_meta(text: str):
     from .survey_efficiency import SampleCut
 
     cut = SampleCut()
-    m = re.search(r"i < ([0-9.]+) deg", text or "")
+    m = re.search(r"\bi < ([0-9.]+) deg", text or "")
     if m:
         cut.i_max = float(m.group(1))
+    m = re.search(r"i_free < ([0-9.]+) deg", text or "")
+    if m:
+        cut.ifree_max = float(m.group(1))
     m = re.search(r"([0-9.]+) < r < ([0-9.]+) au", text or "")
     if m:
         cut.r_range = (float(m.group(1)), float(m.group(2)))
@@ -247,6 +381,12 @@ def debiased_cumulative(like: JointLikelihood, char_root: Path, theta, tag: str 
     _, _, delta = like.unpack(theta)
     out = {}
     for term in like.surveys:
+        if term.kind == "complete":
+            # Every object below the limit is known: bias 1, then the cut fraction.
+            f_cut = float(term.eps.meta.get("f_cut", 1.0))
+            out[term.name] = (term.like.h - like.colour_of(term, delta),
+                              np.full(term.n, 1.0 / f_cut))
+            continue
         path = char_root / term.name / f"plants_{tag}.npz"
         if not path.is_file() or term.inc is None or not np.all(np.isfinite(term.inc)):
             continue
@@ -352,14 +492,18 @@ def write_plots(out_dir: Path, like: JointLikelihood, fit, samples, debiased=Non
         ax.fill_between(hg, q[0], q[1], color="#1f4e79", alpha=0.25, label="68% posterior")
     ax.plot(hg, cum(fit.theta), color="#1f4e79", lw=2.0, label="MLE")
     markers = "osD^v<>ph"
+    kinds = {t.name: t for t in like.surveys}
     for k, (name, (h, w)) in enumerate((debiased or {}).items()):
         good = np.isfinite(w)
         if not good.any():
             continue
         order = np.argsort(h[good])
+        term = kinds.get(name)
+        label = (f"{name} (complete to {term.filter} {term.h_lim:g}, / f_cut, n={int(good.sum())})"
+                 if term is not None and term.kind == "complete"
+                 else f"{name} (sum 1/bias, n={int(good.sum())})")
         ax.step(h[good][order], np.cumsum(w[good][order]), where="post", lw=1.0,
-                marker=markers[k % len(markers)], ms=3, alpha=0.8,
-                label=f"{name} (sum 1/bias, n={int(good.sum())})")
+                marker=markers[k % len(markers)], ms=3, alpha=0.8, label=label)
     ax.set_yscale("log")
     ax.set_xlabel(f"$H_{{{like.model_band}}}$")
     ax.set_ylabel(r"$N(<H)$, whole cold population")

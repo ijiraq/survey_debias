@@ -277,6 +277,17 @@ roots (it exports `read_survey_conf`), the runner gives Detos1
 fit multiplies the selection over epochs, so it needs
 `detections_required` equal to the number of epochs.
 
+When every epoch is required, every detection lies in an epoch-1 tile and
+plants are aimed at epoch 1 only. With `detections_required` below the
+number of epochs (DEEP: any 4 of 29 nights on different fields) plants are
+aimed at every epoch's tiles, each at its own JD. The boxes then overlap
+on the sky, so a plant's weight is $1 / \sum_k 1/P_\text{geom}(A, \beta_k)$
+over every box $k$ (tile, JD) that holds its orbit, $A$ the summed box area
+and $\beta_k$ the orbit's latitude at that JD; with one box this is the usual
+weight. Each plant is one uniform aim in its box: a position the orbit
+cannot reach is an aimed plant of weight zero, not a redraw, since the
+weight is for the whole box.
+
 OSSSSim's `detos1` reports which block detected an object as the key
 `{directory}/{block}`, where `{directory}` is the survey directory (or
 `epoch{i}` when an epoch directory is loaded on its own); each part may be
@@ -431,7 +442,11 @@ apart from `--survey`.
   written when every detection has `a`, `e`, and `i`. Columns through `MPC`
   match `CFEPS.detections`; six columns follow:
   - `ifree`, `Omfree`, `omfree`: free elements relative to the Laplace plane
-    (`Omfree` and `omfree` are 0 when unknown)
+    (`Omfree` and `omfree` are 0 when unknown). This per-detection pipeline
+    uses a linear Laplace-plane approximation (`grid_bias.laplace_inclination`,
+    `laplace_node`); the joint fit's cold selection uses the free inclinations
+    of Huang, Gladman & Volk (2022) instead (`survey_debias.ifree`, see
+    `docs/joint_fit/README.md`).
   - `Hx`: absolute magnitude in `model_band` used for the cell
   - `comp`: component from the detections table (`-` when the table has none)
   - `bias`: $P$ for the detection's cell

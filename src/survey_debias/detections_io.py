@@ -40,7 +40,8 @@ BLOCK_PREFIXES = {
 }
 
 CSV_COLUMNS = ["name", "survey", "block", "filter", "mag", "e_mag", "d_bary", "a", "e",
-               "i", "comp", "cl", "p", "sh", "Hsur", "ra", "dec", "jd", "rate"]
+               "i", "ifree", "ifree_source", "comp", "cl", "p", "sh", "Hsur", "ra", "dec",
+               "jd", "rate"]
 
 
 def read_detections_file(path) -> list[dict]:
@@ -117,14 +118,51 @@ def assign_block(name: str, blocks: dict[str, Block], prefixes: dict | None = No
     return min(candidates)[2]
 
 
+def _unpack_mpc(packed: str) -> str:
+    """Release MPC column (packed provisional or packed number) -> compact designation."""
+    from .ifree import NCODE, unpack_provisional
+
+    packed = (packed or "").strip()
+    if packed.isdigit():
+        return str(int(packed))
+    if len(packed) == 5 and packed[0] in NCODE[10:] and packed[1:].isdigit():
+        return str(NCODE.index(packed[0]) * 10000 + int(packed[1:]))
+    return unpack_provisional(packed)
+
+
+def release_ifree(row: dict) -> tuple[float, str]:
+    """(I_free, source) of a release row: Huang et al. Table 1, else their forcing-pole grid.
+
+    Table 1 is looked up by the release name (OSSOS++ designations) and the MPC
+    designation; otherwise the grid is applied to the release's barycentric
+    elements (a, e, i, Omega, omega).
+    """
+    from .ifree import free_inclination, huang_lookup
+
+    hit = huang_lookup(row.get("object"), _unpack_mpc(row.get("MPC", "")))
+    if hit is not None and math.isfinite(hit["Ifree"]):
+        return float(hit["Ifree"]), "huang2022_table"
+    try:
+        ifree, _ = free_inclination(float(row["a"]), float(row["e"]), float(row["i"]),
+                                    float(row["Omega"]), float(row["omega"]))
+    except (KeyError, ValueError):
+        return math.nan, "none"
+    return float(ifree), "huang2022_grid"
+
+
 @dataclass
 class ColdCut:
-    """Sample selection on the release columns (the same cut is applied to the model)."""
+    """Sample selection on the release columns (the same cut is applied to the model).
+
+    ``i_max`` cuts the ecliptic inclination, ``ifree_max`` the free
+    inclination (``release_ifree``); either may be None.
+    """
 
     classes: tuple = ("cla",)
     parts: tuple = ("m",)
-    i_max: float = 5.0
+    i_max: float | None = 5.0
     secure_only: bool = False
+    ifree_max: float | None = None
 
     def __call__(self, row: dict) -> bool:
         if row["cl"] not in self.classes:
@@ -133,7 +171,24 @@ class ColdCut:
             return False
         if self.secure_only and not str(row["sh"]).startswith("S"):
             return False
-        return float(row["i"]) < self.i_max
+        if self.i_max is not None and not float(row["i"]) < self.i_max:
+            return False
+        if self.ifree_max is not None:
+            if "ifree" not in row:
+                row["ifree"], row["ifree_source"] = release_ifree(row)
+            if not float(row["ifree"]) < self.ifree_max:
+                return False
+        return True
+
+    def describe(self) -> str:
+        parts = [f"cl in {self.classes}", f"p in {self.parts or 'any'}"]
+        if self.i_max is not None:
+            parts.append(f"i < {self.i_max:g} deg")
+        if self.ifree_max is not None:
+            parts.append(f"i_free < {self.ifree_max:g} deg")
+        if self.secure_only:
+            parts.append("secure classes only")
+        return ", ".join(parts)
 
 
 def convert(char_root, survey: str, cut: ColdCut, path=None) -> list[dict]:
@@ -147,11 +202,15 @@ def convert(char_root, survey: str, cut: ColdCut, path=None) -> list[dict]:
         name = row["object"]
         block = assign_block(name, blocks, prefixes, row["RAdeg"], row["DEdeg"], row["JD"])
         filt = blocks[block].filter
+        cold = cut(row)
+        if "ifree" not in row:
+            row["ifree"], row["ifree_source"] = release_ifree(row)
         out.append({
             "name": name, "survey": survey, "block": block, "filter": filt,
             "mag": row["mag"], "e_mag": row["e_mag"], "d_bary": row["dist"],
             "a": row["a"], "e": row["e"], "i": row["i"],
-            "comp": "cold" if cut(row) else "other",
+            "ifree": row["ifree"], "ifree_source": row["ifree_source"],
+            "comp": "cold" if cold else "other",
             "cl": row["cl"], "p": row["p"], "sh": row["sh"], "Hsur": row["Hsur"],
             "ra": row["RAdeg"], "dec": row["DEdeg"], "jd": row["JD"], "rate": row["rate"],
         })
@@ -218,18 +277,21 @@ def main(argv=None) -> int:
                    help="output CSV (default characterization/{survey}/{survey}.csv)")
     p.add_argument("--classes", default="cla", help="comma-separated cl values (default cla)")
     p.add_argument("--parts", default="m", help="comma-separated p values ('' for any)")
-    p.add_argument("--i-max", type=float, default=5.0, help="ecliptic inclination cut [deg]")
+    p.add_argument("--i-max", type=float, default=None,
+                   help="ecliptic inclination cut [deg] (default 5 unless --ifree-max)")
+    p.add_argument("--ifree-max", type=float, default=None,
+                   help="free inclination cut [deg] (Huang et al. 2022), e.g. 4")
     p.add_argument("--secure-only", action="store_true", help="only sh = S... classes")
     args = p.parse_args(argv)
+    i_max = args.i_max if args.i_max is not None or args.ifree_max is not None else 5.0
     cut = ColdCut(tuple(c for c in args.classes.split(",") if c),
-                  tuple(c for c in args.parts.split(",") if c), args.i_max, args.secure_only)
+                  tuple(c for c in args.parts.split(",") if c), i_max, args.secure_only,
+                  args.ifree_max)
     char_root = Path(args.root) / "characterization"
     rows = convert(char_root, args.survey, cut, args.detections)
     out = Path(args.out) if args.out else char_root / args.survey / f"{args.survey}.csv"
     n_cold = sum(r["comp"] == "cold" for r in rows)
-    note = (f"{args.survey} detections; comp = cold for cl in {cut.classes}, "
-            f"p in {cut.parts or 'any'}, i < {cut.i_max:g} deg"
-            + (", secure classes only" if cut.secure_only else ""))
+    note = f"{args.survey} detections; comp = cold for {cut.describe()}"
     write_csv(rows, out, note)
     blocks = sorted({r["block"] for r in rows})
     print(f"wrote {out}: {len(rows)} detections, {n_cold} cold, {len(blocks)} blocks")

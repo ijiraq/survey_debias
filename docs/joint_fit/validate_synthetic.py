@@ -10,6 +10,15 @@ Run from the repository root with ../SurveyCharacterizations and the
 OSSOS model next to it::
 
     python docs/joint_fit/validate_synthetic.py [n_realisations]
+
+With ``--mpc`` each realisation also gets an MPC-like complete survey: every
+cold object of the same truth with catalogue M-band H below the
+characterization/MPC limit (colour N(cbar_M, sigma_c) plus the MPC scatter
+sigma_h), kept with the model's i < 5 deg fraction f_cut. OSSOS detections
+of objects below the limit are dropped (the MPC owns them), and the
+realisation is fitted with and without the MPC term (synthetic/recovery_mpc.*)::
+
+    python docs/joint_fit/validate_synthetic.py --mpc [n_realisations]
 """
 from __future__ import annotations
 
@@ -98,7 +107,138 @@ def fit(cfg, sigma_c=None):
     return f, counts, (float(inside.min()), float(inside.max()))
 
 
+MPC_SURVEY = """
+[[survey]]
+name = "MPC"
+format = "complete"
+spec = "characterization/MPC/MPC.toml"
+detections = "{dir}/MPC.csv"
+columns = {{ name = "desig", h = "h", i = "i" }}
+select = {{ comp = "cold" }}
+"""
+
+
+def realise_mpc(k, theta):
+    """MPC census and the OSSOS catalogue without its MPC objects, for realisation k."""
+    from survey_debias.colours import ColourMap, load_colours
+    from survey_debias.survey_efficiency import CompleteSpec
+
+    d = OUT / f"real{k}"
+    if not (d / "OSSOS_v11.csv").is_file():
+        realise(k, theta, ModelPopulation.from_file(MODEL))
+    rng = np.random.default_rng(7000 + k)
+    spec = CompleteSpec.load(CHAR / "MPC" / "MPC.toml")
+    f_cut = float(EfficiencyTable.load(CHAR / "MPC" / "eps_cold.csv").meta["f_cut"])
+    photspec, _ = load_colours(ROOT / "colour.toml")
+    c_m = ColourMap(photspec, "r").colour(spec.filter, "cold")
+    _, n_range = synthetic.draw_h(rng, 0, theta, (-1.0, spec.h_lim + 2.0))
+    h_r, _ = synthetic.draw_h(rng, rng.poisson(n_range), theta, (-1.0, spec.h_lim + 2.0))
+    h_m = h_r + c_m + SIGMA_C * rng.standard_normal(len(h_r)) \
+        + spec.sigma_h * rng.standard_normal(len(h_r))
+    cold = rng.random(len(h_r)) < f_cut
+    with (d / "MPC.csv").open("w", newline="") as fh:
+        fh.write(f"# synthetic MPC census, realisation {k}, truth {theta}\n")
+        w = csv.writer(fh)
+        w.writerow(["desig", "h", "i", "comp", "H_r"])
+        for j in np.flatnonzero(h_m < spec.h_lim + 1.0):
+            w.writerow([f"SMPC{j:05d}", f"{h_m[j]:.4f}", "2.0", "cold" if cold[j] else "",
+                        f"{h_r[j]:.4f}"])
+    lines = (d / "OSSOS_v11.csv").read_text().splitlines()
+    head = [x for x in lines if x.startswith("#")]
+    rows = list(csv.DictReader([x for x in lines if not x.startswith("#")]))
+    sigma = float(np.hypot(SIGMA_C, spec.sigma_h))
+    keep = [r for r in rows
+            if float(r["H_r"]) + c_m + sigma * rng.standard_normal() >= spec.h_lim]
+    with (d / "OSSOS_v11_mpc.csv").open("w", newline="") as fh:
+        fh.write("\n".join(head) + f"\n# without the {len(rows) - len(keep)} MPC objects\n")
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(keep)
+    cfg = d / "joint_mpc.toml"
+    text = CONFIG.format(k=k, root=ROOT, dir=d).replace(
+        'priority = ["OSSOS_v11", "jwst_sample_a"]',
+        'priority = ["MPC", "OSSOS_v11", "jwst_sample_a"]').replace(
+        f"{d}/OSSOS_v11.csv", f"{d}/OSSOS_v11_mpc.csv")
+    cfg.write_text(text + MPC_SURVEY.format(dir=d))
+    return d / "joint.toml", cfg, int(np.sum((h_m < spec.h_lim) & cold))
+
+
+def _fit_bright(cfg):
+    from survey_debias import hfit
+
+    f, counts, prof = fit(cfg)
+    shape, h_o = f.theta[:3], f.theta[3]
+    return {"alpha": float(f.theta[0]), "beta": float(f.theta[1]), "h_b": float(f.theta[2]),
+            "h_o": float(h_o), "alpha_lo": prof[0], "alpha_hi": prof[1],
+            **{f"N<{h:g}": float(hfit.cumulative(h, *shape, h_o)) for h in (5.0, 5.5, 6.0, 7.0)}}
+
+
+def main_mpc(n_real):
+    from concurrent.futures import ProcessPoolExecutor
+
+    from survey_debias import hfit
+
+    theta, _ = truth()
+    jobs, n_mpc = [], {}
+    for k in range(1, n_real + 1):
+        base_cfg, mpc_cfg, n = realise_mpc(k, theta)
+        n_mpc[k] = n
+        jobs += [(k, "without MPC", base_cfg), (k, "with MPC", mpc_cfg)]
+    with ProcessPoolExecutor(max_workers=min(len(jobs), 10)) as pool:
+        fits = list(pool.map(_fit_bright, [j[2] for j in jobs]))
+    rows = []
+    for (k, label, _), r in zip(jobs, fits):
+        rows.append({"realisation": k, "fit": label, "n_mpc": n_mpc[k], **r})
+        print(rows[-1], flush=True)
+    true_n = {f"N<{h:g}": float(hfit.cumulative(h, *theta)) for h in (5.0, 5.5, 6.0, 7.0)}
+    with (OUT / "recovery_mpc.csv").open("w", newline="") as fh:
+        fh.write(f"# truth alpha beta h_b h_o: {' '.join(f'{x:.4f}' for x in theta)}\n")
+        fh.write(f"# truth {true_n}\n")
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    lines = [f"truth: {true_n}"]
+    for label in ("without MPC", "with MPC"):
+        sel = [r for r in rows if r["fit"] == label]
+        for key in true_n:
+            ratio = np.log10([r[key] / true_n[key] for r in sel])
+            lines.append(f"{label:12s} log10({key} fit / truth): mean {ratio.mean():+.3f}, "
+                         f"rms {np.sqrt(np.mean(ratio ** 2)):.3f}")
+        lines.append(f"{label:12s} alpha 0.5-lnL width: "
+                     f"{np.mean([r['alpha_hi'] - r['alpha_lo'] for r in sel]):.3f}")
+    (OUT / "recovery_mpc.txt").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    plot_mpc(rows, theta)
+
+
+def plot_mpc(rows, theta):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from survey_debias import hfit
+
+    hg = np.linspace(3.5, 9.0, 300)
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.9), sharey=True)
+    for ax, label in zip(axes, ("without MPC", "with MPC")):
+        ax.plot(hg, hfit.cumulative(hg, *theta), color="k", lw=2.2, label="truth")
+        for r in (x for x in rows if x["fit"] == label):
+            ax.plot(hg, hfit.cumulative(hg, r["alpha"], r["beta"], r["h_b"], r["h_o"]),
+                    color="#1f4e79", alpha=0.6, lw=1.2)
+        ax.set_yscale("log")
+        ax.set_ylim(1e-2, 1e4)
+        ax.set_xlabel(r"$H_r$")
+        ax.set_title(f"OSSOS + JWST {label}")
+    axes[0].set_ylabel(r"$N(<H)$")
+    axes[0].legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(OUT / "recovery_mpc.png", dpi=150)
+
+
 def main():
+    if "--mpc" in sys.argv:
+        args = [a for a in sys.argv[1:] if a != "--mpc"]
+        return main_mpc(int(args[0]) if args else 5)
     n_real = int(sys.argv[1]) if len(sys.argv) > 1 else 5
     model = ModelPopulation.from_file(MODEL)
     theta, expected = truth()

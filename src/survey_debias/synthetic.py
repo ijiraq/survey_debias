@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from . import hfit
-from .grid_bias import geometric_prob_for_aimed, sample_aimed_elements_at_i
+from .grid_bias import sample_aimed_elements_at_i
 from .pointings import load_survey_blocks
 from .survey_efficiency import ModelPopulation, SampleCut
 
@@ -59,7 +59,6 @@ def inject(char_root, survey: str, model: ModelPopulation, theta, colour: float,
     out = []
     for name, block in blocks.items():
         sampler = _TileSampler(block)
-        area = block.aim_area_deg2
         h_r, n_range = draw_h(rng, n_plants, theta, h_range, form)
         scatter = 0.0 if filt == model_band else sigma_c
         c = colour + scatter * rng.standard_normal(n_plants)
@@ -72,7 +71,7 @@ def inject(char_root, survey: str, model: ModelPopulation, theta, colour: float,
             el = sample_aimed_elements_at_i(a, e, inc, obs, rng, r, max_tries=1, survey=view)
             if el is None:
                 continue
-            w = geometric_prob_for_aimed(a, e, *el, area_deg2=area)
+            w = sampler.weight(tile, a, e, *el)
             if w <= 0.0:
                 continue
             ok = cut.i_max is None or inc < cut.i_max

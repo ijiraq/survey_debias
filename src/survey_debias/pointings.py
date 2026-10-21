@@ -315,8 +315,20 @@ class Block:
         return sum(t.area_deg2 for t in self.tiles[0])
 
     @property
+    def aim_tiles(self) -> list[tuple[int, Tile]]:
+        """(epoch index, tile) pairs that FoV-aimed plants are drawn from.
+
+        A detection needed at every epoch is in an epoch-1 tile, so epoch 1
+        is enough. With detections_required < n_epochs an object can be found
+        without ever being in epoch 1 (DEEP: different fields on different
+        nights), so every epoch's tiles are aimed at, each at its own JD.
+        """
+        epochs = range(self.n_epochs) if self.detections_required < self.n_epochs else (0,)
+        return [(ep, t) for ep in epochs for t in self.tiles[ep]]
+
+    @property
     def aim_area_deg2(self) -> float:
-        return sum(t.box_area_deg2 for t in self.tiles[0])
+        return sum(t.box_area_deg2 for _ep, t in self.aim_tiles)
 
     def epoch_jds(self) -> tuple:
         return tuple(min(t.jd for t in tiles) for tiles in self.tiles)

@@ -145,6 +145,60 @@ class Overlaps(unittest.TestCase):
         self.assertTrue(np.all(table.eps <= single.eps))
 
 
+class FreeInclinationAiming(unittest.TestCase):
+    def test_poles_through_position_at_free_inclination(self):
+        rng = np.random.default_rng(4)
+        centre = np.array([0.03, -0.001, 1.0])
+        centre /= np.linalg.norm(centre)
+        for _ in range(20):
+            r = np.array([*rng.normal(size=2), 0.02])
+            r /= np.linalg.norm(r)
+            for pole in se.poles_at_angle(r, centre, 2.5):
+                self.assertAlmostEqual(float(pole @ r), 0.0, places=10)
+                self.assertAlmostEqual(float(np.degrees(np.arccos(pole @ centre))), 2.5, places=8)
+        self.assertEqual(se.poles_at_angle(np.array([0.0, 0.0, 1.0]), centre, 2.5), [])
+
+    def test_ifree_cut_needs_ifree_plants(self):
+        rng = np.random.default_rng(5)
+        plants = fake_plants("A", "b", 50, rng)
+        with self.assertRaises(ValueError):
+            se.SampleCut(ifree_max=4.0).mask(plants)
+        plants.aim = "ifree"
+        plants.ifree = np.linspace(0.0, 8.0, 50)
+        m = se.SampleCut(ifree_max=4.0).mask(plants)
+        self.assertEqual(int(m.sum()), int(np.sum(plants.ifree < 4.0)))
+        self.assertEqual(se.SampleCut(ifree_max=4.0).describe(), "i_free < 4 deg")
+
+    def test_plant_table_keeps_ifree_and_aim(self):
+        rng = np.random.default_rng(6)
+        plants = fake_plants("A", "b", 20, rng)
+        plants.aim, plants.ifree = "ifree", rng.uniform(0, 5, 20)
+        with short_tempdir() as tmp:
+            path = Path(tmp) / "plants.npz"
+            plants.save(path)
+            back = se.PlantTable.load(path)
+        self.assertEqual(back.aim, "ifree")
+        np.testing.assert_allclose(back.ifree, plants.ifree)
+
+
+@unittest.skipUnless(HAVE_OSSSSIM, "needs ossssim")
+class GeometryPassFree(unittest.TestCase):
+    def test_plants_keep_the_model_free_inclination(self):
+        model = se.ModelPopulation.from_file(MODEL)
+        with short_tempdir() as tmp:
+            make_jwst_project(Path(tmp))
+            char = Path(tmp) / "characterization"
+            plants = se.geometry_pass(char, "jwst_sample_a", model, 300, seed=3, aim="ifree")
+        self.assertEqual(plants.aim, "ifree")
+        ok = plants.w > 0
+        self.assertGreater(ok.sum(), 50)
+        self.assertGreater(plants.in_field.sum(), 0)
+        self.assertTrue(np.all(np.isfinite(plants.ifree[ok])))
+        # Aimed orbits sit near their model row's free inclination (the forcing pole
+        # moves a little with the aimed i and omega).
+        self.assertLess(float(np.median(plants.ifree[ok])), 6.0)
+
+
 @unittest.skipUnless(HAVE_OSSSSIM, "needs ossssim")
 class GeometryPass(unittest.TestCase):
     def test_plants_land_in_the_three_epoch_field(self):

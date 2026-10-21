@@ -14,6 +14,12 @@ and per-filter colour ``c_f = cbar_f + delta_f`` with intrinsic scatter
 on its catalogue H in the survey's filter, with the block's own selection);
 the Poisson terms tie the surveys' counts, and so the normalisation, together.
 ``Lambda_s`` is marginalised over the Monte Carlo error of ``eps_s``.
+
+A complete survey (``kind = "complete"``, e.g. the MPC catalogue below its
+H limit) has ``eps_s = f_cut 1(H_f < h_lim)`` and the conditional density
+``f_k = lambda_f(H_k) / int^{h_lim} lambda_f dH``, with the colour spread
+widened by the catalogue's H scatter: ``sigma^2 = sigma_c^2 + sigma_h^2``
+(``sigma_h`` alone when the catalogue H is in the model band).
 """
 from __future__ import annotations
 
@@ -44,16 +50,39 @@ def _gh(n):
 
 
 @dataclass
+class CompleteSample:
+    """The sample of a complete survey: every object with catalogue H_f < h_lim."""
+
+    names: np.ndarray
+    h: np.ndarray
+
+    def __post_init__(self):
+        self.index = np.arange(len(self.h))
+        self.selections = {}
+
+    @property
+    def n(self) -> int:
+        return len(self.h)
+
+    @property
+    def sample(self) -> "CompleteSample":
+        return self
+
+
+@dataclass
 class SurveyTerm:
     """One survey in the joint fit."""
 
     name: str
     filter: str
-    like: hfit.ConditionalLikelihood
+    like: hfit.ConditionalLikelihood | CompleteSample
     eps: EfficiencyTable
     colour: float                       # cbar_f = filter - model band (cold mean)
     overlaps: list = field(default_factory=list)   # (higher-priority survey, eps table)
     inc: np.ndarray | None = None       # detections' ecliptic inclination (for plots)
+    kind: str = "survey"                # or "complete"
+    h_lim: float = math.inf             # complete: catalogue H_f limit
+    sigma_h: float = 0.0                # complete: catalogue H scatter [mag]
 
     @property
     def n(self) -> int:
@@ -123,25 +152,41 @@ class JointLikelihood:
             return hfit.log_differential_exponential(h, shape[0], h_o)
         return hfit.log_differential(h, *shape, h_o)
 
-    def log_lambda_f(self, h, shape, h_o, colour, filt=None):
-        """ln of lambda(H - c) averaged over c ~ N(colour, sigma_c).
+    def log_lambda_f(self, h, shape, h_o, colour, filt=None, sigma_h: float = 0.0):
+        """ln of lambda(H - c) averaged over c ~ N(colour, sigma), sigma^2 = sigma_c^2 + sigma_h^2.
 
         In the model band itself (``filt == model_band``) there is no colour
-        and no spread.
+        and only the extra scatter ``sigma_h``.
         """
         h = np.asarray(h, dtype=float)
         if filt == self.model_band:
-            return self.log_lambda_r(h, shape, h_o)
-        if self.sigma_c <= 0.0:
+            colour, sigma = 0.0, sigma_h
+        else:
+            sigma = math.hypot(self.sigma_c, sigma_h)
+        if sigma <= 0.0:
             return self.log_lambda_r(h - colour, shape, h_o)
-        shifts = colour + self.sigma_c * self._cx
+        shifts = colour + sigma * self._cx
         terms = np.stack([self.log_lambda_r(h - c, shape, h_o) for c in shifts])
         return logsumexp(terms + np.log(self._cw)[:, None], axis=0)
+
+    def log_lambda_term(self, term: SurveyTerm, h, shape, h_o, colour):
+        return self.log_lambda_f(h, shape, h_o, colour, term.filter, term.sigma_h)
 
     # -- terms ----------------------------------------------------------------
 
     def conditional(self, term: SurveyTerm, shape, h_o, colour) -> float:
         like = term.like
+        if term.kind == "complete":
+            from .survey_efficiency import step_weights
+
+            ld = self.log_lambda_term(term, like.h, shape, h_o, colour)
+            h = term.eps.h
+            w = step_weights(h, term.h_lim) * np.gradient(h)
+            lg = self.log_lambda_term(term, h[w > 0], shape, h_o, colour)
+            norm = float(logsumexp(lg + np.log(w[w > 0])))
+            if not (np.all(np.isfinite(ld)) and np.isfinite(norm)):
+                return -np.inf
+            return float(np.sum(ld) - like.n * norm)
         lg = self.log_lambda_f(like.grid, shape, h_o, colour, term.filter)
         ld = like._point_log_lambda(self.log_lambda_f(like.h_pt, shape, h_o, colour, term.filter))
         if ld is None or not np.any(np.isfinite(lg)):
@@ -151,7 +196,7 @@ class JointLikelihood:
     def expected(self, term: SurveyTerm, shape, h_o, delta, boot: bool = False):
         """Lambda_s (minus overlaps), and its replicates over eps bootstraps."""
         colour = self.colour_of(term, delta)
-        lam = np.exp(self.log_lambda_f(term.eps.h, shape, h_o, colour, term.filter))
+        lam = np.exp(self.log_lambda_term(term, term.eps.h, shape, h_o, colour))
         dh = np.gradient(term.eps.h)
         total = float(np.sum(lam * term.eps.eps * dh))
         reps = (term.eps.boot * (lam * dh)[None, :]).sum(axis=1) if boot else None
@@ -208,8 +253,8 @@ class JointLikelihood:
     def detected_density(self, term: SurveyTerm, theta) -> tuple[np.ndarray, np.ndarray]:
         """(H_f, lambda_f eps_s): the model's distribution of detected H in survey s."""
         shape, h_o, delta = self.unpack(theta)
-        lam = np.exp(self.log_lambda_f(term.eps.h, shape, h_o, self.colour_of(term, delta),
-                                       term.filter))
+        lam = np.exp(self.log_lambda_term(term, term.eps.h, shape, h_o,
+                                          self.colour_of(term, delta)))
         return term.eps.h, lam * term.eps.eps
 
 

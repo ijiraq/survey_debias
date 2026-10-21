@@ -10,7 +10,9 @@ number of epochs ``survey.conf`` requires. With an ossssim that loads
 multi-epoch survey roots, Detos1 is given ``characterization/{survey}``
 once and applies that requirement itself. The draw carries the
 single-epoch geometric probability for the block's total area, so the mean
-over draws is the block bias.
+over draws is the block bias. A survey found at fewer epochs than it has is
+aimed at every epoch's tiles, and a draw's weight divides out every box
+(tile, JD) that holds its orbit (:class:`_TileSampler`).
 
 The bias attached to a detection is the union over every block of the
 project, sum_b P_b(cell): the probability the object would have been found
@@ -34,6 +36,7 @@ from .grid_bias import (
     TARGET_DETECTIONS,
     GridSurvey,
     OrbitModelCatalog,
+    apparent_radec_deg,
     as_check_arrays,
     bounds_from_key,
     can_write_detections_full,
@@ -46,6 +49,7 @@ from .grid_bias import (
     icrs_to_ecliptic,
     load_detections,
     los_circular_elements,
+    mean_motion_deg_per_day,
     record_check_sample,
     rih_bounds_from_key,
     sample_aimed_elements,
@@ -269,34 +273,95 @@ def _los_elements(tile, char_dir, obs, jd):
 
 
 class _TileSampler:
-    """Chooses a block's tile with probability ∝ area; caches observer vectors."""
+    """Chooses one of a block's aim tiles with probability ∝ box area.
+
+    ``weight`` is the plant's importance weight. With one aim epoch it is
+    P_geom for the summed box area A. When every epoch is aimed at
+    (:attr:`Block.aim_tiles`) the boxes overlap on the sky and sit at
+    different JDs, so a plant could have been drawn from any box (tile, JD)
+    that holds its orbit: the weight is 1 / sum_k 1/P_geom(A, beta_k) over
+    those boxes, beta_k the orbit's latitude at box k's JD. With one box this
+    is the single-epoch weight.
+    """
 
     def __init__(self, block: Block, survey: GridSurvey | None = None):
         self.block = block
-        self.tiles = list(block.tiles[0])
+        entries = block.aim_tiles
+        self.epochs = [ep for ep, _t in entries]
+        self.tiles = [t for _ep, t in entries]
         areas = np.array([t.box_area_deg2 for t in self.tiles], dtype=float)
+        self.area = float(areas.sum())
         self.prob = areas / areas.sum()
         self.views = [block.field_view(t, survey) for t in self.tiles]
+        self.multi_epoch = len(set(self.epochs)) > 1
+        self._index = {id(t): k for k, t in enumerate(self.tiles)}
         self._obs = {}
+
+    def observer(self, k: int):
+        if k not in self._obs:
+            tile = self.tiles[k]
+            self._obs[k] = observer_icrf(self.block.char_dirs[self.epochs[k]], tile.observer,
+                                         tile.jd)
+        return self._obs[k]
 
     def draw(self, rng):
         k = int(rng.choice(len(self.tiles), p=self.prob)) if len(self.tiles) > 1 else 0
-        tile = self.tiles[k]
-        if k not in self._obs:
-            self._obs[k] = observer_icrf(self.block.char_dirs[0], tile.observer, tile.jd)
-        return tile, self.views[k], self._obs[k]
+        return self.tiles[k], self.views[k], self.observer(k)
+
+    def _in_box(self, k: int, ra: float, dec: float) -> bool:
+        """In tile k's sampling box (the rectangle sample_mosaic_icrs draws from)."""
+        v = self.views[k]
+        half_ra = 0.5 * v.mosaic_width_deg / math.cos(math.radians(v.field_dec_deg))
+        dra = (ra - v.field_ra_deg + 180.0) % 360.0 - 180.0
+        return abs(dra) <= half_ra and abs(dec - v.field_dec_deg) <= 0.5 * v.mosaic_height_deg
+
+    def weight(self, tile, a, e, inc, node, peri, M, prob=None) -> float:
+        """Importance weight of a plant aimed into ``tile`` with elements at tile.jd.
+
+        ``prob(M_deg, area_deg2)`` is P_geom of the orbit with mean anomaly
+        M_deg; the default is :func:`geometric_prob_for_aimed` (ecliptic
+        latitude).
+        """
+        if prob is None:
+            def prob(m_deg, area):
+                return geometric_prob_for_aimed(a, e, inc, node, peri, m_deg, area_deg2=area)
+        p0 = prob(M, self.area)
+        if not self.multi_epoch or p0 <= 0.0:
+            return p0
+        k0 = self._index[id(tile)]
+        n = mean_motion_deg_per_day(a)
+        inv = 1.0 / p0
+        for k, t in enumerate(self.tiles):
+            if k == k0:
+                continue
+            m_k = M + n * (t.jd - tile.jd)
+            ra, dec = apparent_radec_deg(a, e, inc, node, peri, m_k, self.observer(k))
+            if self._in_box(k, ra, dec):
+                p = prob(m_k, self.area)
+                if p > 0.0:
+                    inv += 1.0 / p
+        return 1.0 / inv
+
+
+UNREACHABLE = "unreachable"
 
 
 def _bias_loop(sim, block: Block, draw_elements, seed: int, target: int,
                group: str, must_detect: bool, max_aimed: int | None,
                label: str) -> BiasEstimate:
-    """Shared FoV-aimed loop: draw_elements(rng, view, obs) -> (a, e, inc, node, peri, M, H)."""
+    """Shared FoV-aimed loop: draw_elements(rng, view, obs) -> (a, e, inc, node, peri, M, H).
+
+    draw_elements makes one aim at one uniform position in the tile's box and
+    returns UNREACHABLE when the orbit cannot pass there (|beta| > i). That
+    draw is an aimed plant of weight 0: the weight is P_geom for the whole
+    box, so retrying the position until it succeeds would overcount boxes that
+    the orbit only partly reaches. None (e.g. no model orbit) is redrawn.
+    """
     rng = np.random.default_rng(seed)
     sampler = _TileSampler(block)
-    area = block.aim_area_deg2
     sampled = empty_check_samples()
     detected = empty_check_samples()
-    n_detected = n_aimed = n_fail = 0
+    n_detected = n_aimed = n_fail = n_miss = 0
     sum_w = sum_w2 = 0.0
     max_tries = max(target * 1000, 10000)
     max_aimed = max_aimed or MAX_AIMED_FACTOR * target
@@ -306,9 +371,13 @@ def _bias_loop(sim, block: Block, draw_elements, seed: int, target: int,
         if el is None:
             n_fail += 1
             continue
+        if el is UNREACHABLE:
+            n_aimed += 1
+            n_miss += 1
+            continue
         a, e, inc, node, peri, M, H = el
         n_aimed += 1
-        p_geom = geometric_prob_for_aimed(a, e, inc, node, peri, M, area_deg2=area)
+        p_geom = sampler.weight(tile, a, e, inc, node, peri, M)
         rows = sim.epoch_rows(a, e, inc, node, peri, M, H, epoch_jd=tile.jd, comp=group)
         ra, dec = _row_radec(rows[0])
         record_check_sample(sampled, ra, dec, a, e, inc, node, peri, M)
@@ -320,14 +389,14 @@ def _bias_loop(sim, block: Block, draw_elements, seed: int, target: int,
         if n_aimed % 500 == 0:
             bias_so_far, _ = mc_bias(n_aimed, sum_w, sum_w2)
             print(
-                f"    ... {label}: {n_aimed} aimed ({n_fail} fail), "
+                f"    ... {label}: {n_aimed} aimed ({n_miss} unreachable, {n_fail} fail), "
                 f"{n_detected}/{target} detections  "
                 f"P(det|FoV)={n_detected / n_aimed:.3g}  bias~{bias_so_far:.3g}",
                 flush=True,
             )
     if n_detected < target:
         msg = (f"{label}: {n_detected}/{target} detections after {n_aimed} aimed "
-               f"plants ({n_fail} fail)")
+               f"plants ({n_miss} unreachable, {n_fail} fail)")
         if must_detect and n_detected == 0:
             raise RuntimeError(msg + "; a detection in this block has no simulated twin")
         print(f"    {msg}; keeping the estimate and its MC error", flush=True)
@@ -349,8 +418,8 @@ def compute_cell_bias(sim, block: Block, cell_bounds: dict, seed: int, target: i
         sin_ifree = float(rng.uniform(si0, si1))
         ifree = math.degrees(math.asin(max(0.0, min(1.0, sin_ifree))))
         H = float(rng.uniform(h0, h1))
-        el = sample_aimed_elements(a, e, ifree, obs, rng, survey=view)
-        return None if el is None else (a, e, *el, H)
+        el = sample_aimed_elements(a, e, ifree, obs, rng, max_tries=1, survey=view)
+        return UNREACHABLE if el is None else (a, e, *el, H)
 
     return _bias_loop(sim, block, draw, seed, target, group, must_detect, max_aimed,
                       f"{block.survey}/{block.name}")
@@ -381,8 +450,9 @@ def compute_model_ae_bias(sim, block: Block, cell_bounds: dict, model: OrbitMode
             a, e, _comp = candidates.sample_ae(rng, r_au=r_au)
         except RuntimeError:
             return None
-        el = sample_aimed_elements_at_i(a, e, inc_cell, obs, rng, r_au, survey=view)
-        return None if el is None else (a, e, *el, H)
+        el = sample_aimed_elements_at_i(a, e, inc_cell, obs, rng, r_au, max_tries=1,
+                                        survey=view)
+        return UNREACHABLE if el is None else (a, e, *el, H)
 
     return _bias_loop(sim, block, draw, seed, target, group, must_detect, max_aimed,
                       f"{block.survey}/{block.name}")
@@ -466,7 +536,8 @@ def run_grid_bias(survey: GridSurvey, root: Path, target: int = TARGET_DETECTION
         p_geo = geometric_detection_prob(b.aim_area_deg2, 7.0, lat)
         print(
             f"  {b.survey}/{b.name}: {len(b.tiles[0])} tile(s), "
-            f"{b.area_deg2:.4f} deg² footprint ({b.aim_area_deg2:.4f} sampled), "
+            f"{b.area_deg2:.4f} deg² footprint ({b.aim_area_deg2:.4f} sampled over "
+            f"{len(b.aim_tiles)} aim tile(s)), "
             f"filter {b.filter}, {b.n_epochs} epoch(s) "
             f"JD {', '.join(f'{jd:.5f}' for jd in b.epoch_jds())}, "
             f"detection at {b.detections_required}; "

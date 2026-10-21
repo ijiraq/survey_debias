@@ -10,3 +10,5 @@ build/
 dist/
 .DS_Store
 docs/joint_fit/synthetic/real*/
+Rebound_Archive*
+*.png

@@ -3,10 +3,20 @@
 # Filters are single letters A-z (OSSSSim filter_to_index), matching the
 # filter= line of each block's .eff file.
 #
+# The Eduardo et al. 2026 JWST samples are measured in NIRCam F150W2, which
+# the .eff files label H (close to 2MASS H).
+# m_r = m_F150W2 + 1 as in the paper; ossssim's 
+# built-in 2MASS H colour is r - H = 0.9.
+#
+# HST ACS F606W in STMAG (N26) is labelled t: 
+# t = STMAG_F606W = r_AB + 0.3, so "t-g" = "r-g" + 0.3 
+# default t-g = -0.7 + 0.3 = -0.4.
+# cold    t-g = -0.8 + 0.3 = -0.5
+#
 # A detection's spectral group is chosen from its comp value: the first
-# group whose name appears in comp (so comp "cold_classical" uses [cold]),
-# otherwise [default]. Its colour is (block filter) - model_band, applied
-# as H_filter = H_model + colour, as OSSSSim's detos1 does.
+# group whose name appears in comp (so comp "cold" uses [cold]), otherwise
+# [default]. Its colour is (block filter) - model_band, applied as
+# H_filter = H_model + colour, as OSSSSim's detos1 does.
 
 [default]
 "g-g" = 0.0
@@ -20,17 +30,15 @@
 "I-g" = -1.2
 "w-g" = -0.8
 "J-g" = -1.5
-# JWST NIRCam F150W2 is labelled H (close to 2MASS H): m_r = m_F150W2 + 1
 "H-g" = -1.7
-# t = HST ACS F606W STMAG (not r, not w): STMAG = r_AB + 0.3
 "t-g" = -0.4
 
-# Dynamically cold objects are redder: g - r = 0.9 (OSSOS 1.0 model; the
+# Dynamically cold objects are redder: g - r = 0.8 (OSSOS 1.0 model; the
 # [default] 0.7 is a hot + cold mix). Every other band keeps its colour
-# relative to r.
+# relative to r, so r - H = 1.0 and t - r = 0.3 as in [default].
 [cold]
 "g-g" = 0.0
-"r-g" = -0.9
+"r-g" = -0.8
 "i-g" = -1.4
 "z-g" = -1.9
 "u-g" = 0.1
@@ -40,5 +48,5 @@
 "I-g" = -1.4
 "w-g" = -1.0
 "J-g" = -1.7
-"H-g" = -1.9
-"t-g" = -0.6
+"H-g" = -1.8
+"t-g" = -0.5

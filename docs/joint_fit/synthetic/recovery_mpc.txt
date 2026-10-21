@@ -1,0 +1,11 @@
+truth: {'N<5': 0.8864932637278331, 'N<5.5': 9.244779715702846, 'N<6': 63.15494025515355, 'N<7': 1152.557988190201}
+without MPC  log10(N<5 fit / truth): mean -0.596, rms 0.725
+without MPC  log10(N<5.5 fit / truth): mean -0.317, rms 0.401
+without MPC  log10(N<6 fit / truth): mean -0.154, rms 0.222
+without MPC  log10(N<7 fit / truth): mean -0.019, rms 0.083
+without MPC  alpha 0.5-lnL width: 0.174
+with MPC     log10(N<5 fit / truth): mean -0.015, rms 0.149
+with MPC     log10(N<5.5 fit / truth): mean +0.005, rms 0.117
+with MPC     log10(N<6 fit / truth): mean +0.012, rms 0.102
+with MPC     log10(N<7 fit / truth): mean +0.009, rms 0.069
+with MPC     alpha 0.5-lnL width: 0.164
