@@ -124,7 +124,8 @@ def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[d
                 for r in raw if r["comp"] == "cold"]
     elif fmt == "csv":
         cols = {"mag": "mag", "d_bary": "d_bary", "name": "name", "block": "block",
-                "d_bary_err": "d_bary_err", "h": None, "i": "i", **spec.get("columns", {})}
+                "d_bary_err": "d_bary_err", "h": None, "i": "i", "epochs": "epochs",
+                **spec.get("columns", {})}
         select = spec.get("select", {})
         rows = []
         for r in _read_csv(root / spec["detections"]):
@@ -137,15 +138,57 @@ def survey_rows(spec: dict, root: Path, char_root: Path, blocks: dict) -> list[d
             err = r.get(cols["d_bary_err"], "")
             h = r.get(cols["h"], "") if cols["h"] else ""
             inc = r.get(cols["i"], "")
+            epochs = r.get(cols["epochs"], "") or ""
             rows.append({"name": r[cols["name"]], "block": block,
                          "mag": float(r[cols["mag"]]), "d_bary": float(r[cols["d_bary"]]),
                          "d_err": float(err) if err not in ("", None) else math.nan,
                          "h": float(h) if h not in ("", None) else math.nan,
-                         "i": float(inc) if inc not in ("", None) else math.nan})
+                         "i": float(inc) if inc not in ("", None) else math.nan,
+                         "epochs": epochs.strip()})
     else:
         raise ValueError(f"{name}: format must be 'csv', 'release' or 'complete', not {fmt!r}")
     excluded = set(spec.get("exclude_blocks", []))
     return [r for r in rows if r["block"] not in excluded]
+
+
+def _selection_groups(name: str, rows: list[dict], blocks: dict) -> tuple[list, dict]:
+    """Per-detection selection group labels and the selection of each group.
+
+    A block found at every epoch has one group, ``{survey}/{block}``. A K-of-N
+    block (DEEP: any 4 of 29 nights) needs the epochs each detection was in
+    the field at, from the ``epochs`` column (1-based epoch numbers separated
+    by ``;``): its group is ``{survey}/{block}|{epochs}`` and its selection is
+    P(at least K of those epochs), with the pointings' fill factors.
+    """
+    labels, selections = [], {}
+    for r in rows:
+        block = blocks[r["block"]]
+        label = f"{name}/{r['block']}"
+        if block.k_of_n:
+            text = r.get("epochs", "")
+            if not text:
+                raise ValueError(f"{name}/{r['block']}: {r['name']} has no 'epochs' column "
+                                 f"value; a block found at {block.detections_required} of "
+                                 f"{block.n_epochs} epochs needs the epochs each detection "
+                                 "was in the field at")
+            epochs = sorted({int(x) for x in text.replace(",", ";").split(";") if x.strip()})
+            if not all(1 <= e <= block.n_epochs for e in epochs):
+                raise ValueError(f"{name}: {r['name']} epochs {text!r} outside 1..{block.n_epochs}")
+            if len(epochs) < block.detections_required:
+                raise ValueError(f"{name}: {r['name']} is in the field at {len(epochs)} epochs, "
+                                 f"fewer than the {block.detections_required} required")
+            label = f"{label}|{';'.join(map(str, epochs))}"
+            if label not in selections:
+                selections[label] = block.kofn_selection([e - 1 for e in epochs], with_fill=True)
+        else:
+            selections.setdefault(label, block.selection)
+        labels.append(label)
+    return labels, selections
+
+
+def group_block(group: str) -> str:
+    """Block name of a selection group label (``survey/block`` or ``survey/block|epochs``)."""
+    return str(group).split("/", 1)[1].split("|", 1)[0]
 
 
 def _pointing_h(row: dict, block) -> float:
@@ -229,13 +272,13 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
         h_cat = np.array([r["h"] for r in rs])
         h = np.array([hc if np.isfinite(hc) else _pointing_h(r, blocks[name][r["block"]])
                       for hc, r in zip(h_cat, rs)])
+        groups, selections = _selection_groups(name, rs, blocks[name])
         sample = hfit.HSample(
             names=np.array([r["name"] for r in rs]), h=h, m=m, bias=np.ones(len(rs)),
             rate=hfit.opposition_rate(d), h_column=f"H_{filt}", source=name,
-            group=np.array([f"{name}/{r['block']}" for r in rs], dtype=object), d=d,
+            group=np.array(groups, dtype=object), d=d,
             d_err=np.array([r["d_err"] for r in rs]),
         )
-        selections = {f"{name}/{b}": blk.selection for b, blk in blocks[name].items()}
         like = hfit.ConditionalLikelihood(sample, selections, float(h.min()) - 1.0,
                                           measurement=spec.get("measurement", "model"))
         eps = EfficiencyTable.load(char_root / name / f"eps_{tag}.csv")
@@ -248,6 +291,9 @@ def build_terms(cfg: dict, base: Path, sigma_c=None, sigma_delta=None
                              f"{sorted(eps_excl)}; rerun survey_debias_eff --exclude-block")
         if spec.get("format") == "release":
             _check_cut(name, spec.get("cold", {}), eps, tag)
+        elif "eps_cut" in spec:
+            # A CSV sample selected with `select` states the cut it matches.
+            _check_cut(name, spec["eps_cut"], eps, tag)
         term = SurveyTerm(name, filt, like, eps, colours.colour(filt, group),
                           inc=np.array([r["i"] for r in rs])[like.index])
         terms.append(term)
@@ -365,20 +411,54 @@ def _cut_from_meta(text: str):
     return cut
 
 
+class _CutFractions:
+    """Model fraction of the population inside an eps table's cut (``f_cut``).
+
+    Taken from the table's ``f_cut`` line (survey_debias_eff writes it), or
+    computed from the model file and components the table names, read once.
+    """
+
+    def __init__(self):
+        self._models = {}
+
+    def get(self, meta: dict, root: Path) -> float | None:
+        from .survey_efficiency import ModelPopulation, model_cut_fraction
+
+        if "f_cut" in meta:
+            return float(meta["f_cut"])
+        path = Path(meta.get("model", ""))
+        if not path.is_absolute():
+            path = Path(root) / path
+        if not path.is_file():
+            return None
+        components = tuple(c for c in meta.get("components", "").split(",") if c)
+        key = (str(path), components)
+        if key not in self._models:
+            self._models[key] = (ModelPopulation.from_file(path, components) if components
+                                 else ModelPopulation.from_file(path))
+        frac, _ = model_cut_fraction(self._models[key], _cut_from_meta(meta.get("cut", "")))
+        return frac
+
+
 def debiased_cumulative(like: JointLikelihood, char_root: Path, theta, tag: str = "cold"
                         ) -> dict:
     """Per survey: (H_r, weight) with weight = 1 / (union bias x cut fraction).
 
     A detection's bias is P(found by any block of its survey | its r, i, H) for
     the cold model, from the survey's plant table (plants within HT_DR au and
-    HT_DI deg, weighted by w 1(in field) S_bar). sum 1/bias counts the cold
-    objects inside the survey's cut; dividing by the model fraction of cold
-    objects that pass the cut makes each survey estimate the whole population,
-    like N(<H). H_r is the catalogue H less the survey's fitted mean colour.
+    HT_DI deg, weighted by w 1(in field) S_bar), summed over every block the
+    eps table covers. sum 1/bias counts the cold objects inside the survey's
+    cut; dividing by the model fraction of cold objects that pass the cut
+    (f_cut, as for a complete survey) makes each survey estimate the whole
+    population, like N(<H). That is a fraction of model rows, not of plants:
+    plants aimed where their orbit cannot pass have no i_free and would make
+    it far too small for fields away from the plane. H_r is the catalogue H
+    less the survey's fitted mean colour.
     """
-    from .survey_efficiency import PlantTable
+    from .survey_efficiency import PlantTable, _SelectionCache
 
     _, _, delta = like.unpack(theta)
+    cut_fractions = _CutFractions()
     out = {}
     for term in like.surveys:
         if term.kind == "complete":
@@ -391,27 +471,42 @@ def debiased_cumulative(like: JointLikelihood, char_root: Path, theta, tag: str 
         if not path.is_file() or term.inc is None or not np.all(np.isfinite(term.inc)):
             continue
         plants = PlantTable.load(path)
-        frac = float(_cut_from_meta(term.eps.meta.get("cut", "")).mask(plants).mean())
+        frac = cut_fractions.get(term.eps.meta, char_root.parent)
+        if frac is None:
+            print(f"{term.name}: no f_cut in eps_{tag}.csv and its model "
+                  f"{term.eps.meta.get('model', '?')!r} is not readable; no sum 1/bias points",
+                  flush=True)
+            continue
         s = term.like.sample
-        groups = list(term.like.selections.items())
-        by_block = {g: plants.block == g.split("/", 1)[1] for g, _ in groups}
+        # Every block of the survey that eps covers, with or without detections.
+        survey_blocks = load_survey_blocks(char_root, term.name, use_ossssim=False)
+        excluded = set(x for x in term.eps.meta.get("excluded_blocks", "none").split(",")
+                       if x != "none")
+        blocks = {b: blk for b, blk in survey_blocks.items() if b not in excluded}
+        plants.check_epochs(blocks)
+        selection_for = _SelectionCache()
+        by_block = {b: plants.block == b for b in blocks}
         weights = np.full(len(s), np.nan)
         for k in range(len(s)):
             near = (np.abs(plants.r - s.d[k]) < HT_DR) & (np.abs(plants.i - term.inc[k]) < HT_DI)
             bias = 0.0
-            for g, sel in groups:
-                window = near & by_block[g]
+            for b, block in blocks.items():
+                window = near & by_block[b]
                 n = int(window.sum())
-                use = window & plants.in_field
-                if n == 0 or not use.any():
+                use = np.flatnonzero(window & plants.in_field)
+                if n == 0 or not use.size:
                     continue
                 m_t = s.h[k] + plants.mu[use]
                 rate = np.round(plants.rate[use], 1)
+                masks = plants.epochs[use] if block.k_of_n else np.full(use.size, -1)
                 total = 0.0
-                for rv in np.unique(rate):
-                    pick = rate == rv
-                    total += float(np.sum(plants.w[use][pick]
-                                          * sel.measured_selection(m_t[pick], float(rv))))
+                for mask in np.unique(masks):
+                    plant_sel = selection_for(block, mask)
+                    for rv in np.unique(rate[masks == mask]):
+                        pick = (masks == mask) & (rate == rv)
+                        total += float(np.sum(plants.w[use][pick]
+                                              * plant_sel.measured_selection(m_t[pick],
+                                                                             float(rv))))
                 bias += total / n
             if bias > 0.0:
                 weights[k] = 1.0 / (bias * frac)
@@ -420,12 +515,52 @@ def debiased_cumulative(like: JointLikelihood, char_root: Path, theta, tag: str 
     return out
 
 
+def parameter_box_text(like: JointLikelihood, fit, samples) -> str:
+    """MLE of alpha, beta, H_B and H_o with the 68% posterior interval.
+
+    Without samples the alpha interval is the profile range within 0.5 of the
+    peak; the other parameters show the MLE alone.
+    """
+    labels = {"alpha": r"\alpha", "beta": r"\beta", "h_b": r"H_B", "h_o": r"H_o"}
+    keys = ["alpha", "h_o"] if like.form == "exponential" else ["alpha", "beta", "h_b", "h_o"]
+    lines = [f"MLE ({like.form}), 68% interval"]
+    for key in keys:
+        k = like.names.index(key)
+        value = float(fit.theta[k])
+        interval = None
+        if samples is not None and len(samples):
+            lo, hi = np.percentile(np.asarray(samples)[:, k], [16, 84])
+            interval = (float(lo), float(hi))
+        elif key == "alpha":
+            prof = np.asarray(getattr(fit, "profile_loglike", []), dtype=float)
+            alpha = np.asarray(getattr(fit, "profile_alpha", []), dtype=float)
+            ok = np.isfinite(prof) & (prof > -1e299)
+            if ok.any():
+                inside = alpha[ok][prof[ok] - prof[ok].max() >= -0.5]
+                interval = (float(inside.min()), float(inside.max()))
+        digits = 2 if key in ("h_b", "h_o") else 3
+        text = f"${labels[key]}$ = {value:.{digits}f}"
+        if interval is not None:
+            text += f"  [{interval[0]:.{digits}f}, {interval[1]:.{digits}f}]"
+        lines.append(text)
+    return "\n".join(lines)
+
+
+def _parameter_box(ax, text: str, loc: str = "upper left") -> None:
+    x, ha = (0.02, "left") if "left" in loc else (0.98, "right")
+    y, va = (0.98, "top") if "upper" in loc else (0.02, "bottom")
+    ax.text(x, y, text, transform=ax.transAxes, ha=ha, va=va, fontsize=7,
+            family="monospace", bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                                          edgecolor="0.6", alpha=0.9))
+
+
 def write_plots(out_dir: Path, like: JointLikelihood, fit, samples, debiased=None
                 ) -> list[Path]:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    box = parameter_box_text(like, fit, samples)
     written = []
     n = len(like.surveys)
     fig, axes = plt.subplots(1, n, figsize=(4.6 * n, 3.8), squeeze=False)
@@ -441,6 +576,7 @@ def write_plots(out_dir: Path, like: JointLikelihood, fit, samples, debiased=Non
         ax.set_xlabel(f"catalogue $H_{{{term.filter}}}$")
         ax.set_ylabel("detections per 0.5 mag")
         ax.legend(frameon=False, fontsize=8, loc="upper left")
+    _parameter_box(axes[0][-1], box, "upper right")
     fig.tight_layout()
     path = out_dir / "joint_detected.png"
     fig.savefig(path, dpi=150)
@@ -468,6 +604,7 @@ def write_plots(out_dir: Path, like: JointLikelihood, fit, samples, debiased=Non
         ax.set_xlabel(r"faint-end slope $\alpha$")
         ax.set_ylabel(r"profile $\ln L - \max\ln L$")
         ax.legend(frameon=False, fontsize=8, loc="lower right")
+        _parameter_box(ax, box, "upper right")
         fig.tight_layout()
         path = out_dir / "joint_profile_alpha.png"
         fig.savefig(path, dpi=150)
@@ -504,10 +641,13 @@ def write_plots(out_dir: Path, like: JointLikelihood, fit, samples, debiased=Non
                  else f"{name} (sum 1/bias, n={int(good.sum())})")
         ax.step(h[good][order], np.cumsum(w[good][order]), where="post", lw=1.0,
                 marker=markers[k % len(markers)], ms=3, alpha=0.8, label=label)
+    ax.set_ylim(0.8, 8.8E6)
+    ax.set_xlim(4.1, 14.2)
     ax.set_yscale("log")
     ax.set_xlabel(f"$H_{{{like.model_band}}}$")
     ax.set_ylabel(r"$N(<H)$, whole cold population")
-    ax.legend(frameon=False, fontsize=7, loc="upper left")
+    ax.legend(frameon=False, fontsize=7, loc="lower right")
+    _parameter_box(ax, box, "upper left")
     fig.tight_layout()
     path = out_dir / "joint_cumulative.png"
     fig.savefig(path, dpi=150)

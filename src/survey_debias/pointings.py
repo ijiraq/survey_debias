@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .colours import ColourMap, check_filter_name, load_colours
-from .efficiency import EpochSelection, SurveySelection, read_efficiency_file
+from .efficiency import EpochSelection, KofNSelection, SurveySelection, read_efficiency_file
 from .grid_bias import FieldView, parse_jpl_horizons_icrf
 
 POINTINGS_NAME = "pointings.list"
@@ -313,6 +313,27 @@ class Block:
     @property
     def area_deg2(self) -> float:
         return sum(t.area_deg2 for t in self.tiles[0])
+
+    @property
+    def k_of_n(self) -> bool:
+        """Found at some, not all, of several epochs: the selection depends on which."""
+        return 1 < self.n_epochs and self.detections_required < self.n_epochs
+
+    def epoch_fill(self, epoch: int) -> float:
+        tiles = self.tiles[epoch]
+        area = sum(t.area_deg2 for t in tiles)
+        return sum(t.fill * t.area_deg2 for t in tiles) / area if area > 0 else 1.0
+
+    def kofn_selection(self, epochs, with_fill: bool) -> KofNSelection:
+        """Selection of an object in the field at ``epochs`` (0-based epoch indices).
+
+        ``with_fill`` multiplies each epoch by its fill factor (a real
+        detection); planted objects already had the fill factor drawn.
+        """
+        epochs = sorted(int(e) for e in epochs)
+        fill = tuple(self.epoch_fill(e) for e in epochs) if with_fill else None
+        return KofNSelection([self.selection.epochs[e] for e in epochs],
+                             self.detections_required, fill)
 
     @property
     def aim_tiles(self) -> list[tuple[int, Tile]]:

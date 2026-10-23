@@ -423,18 +423,106 @@ class SurveySelection:
         return any(e.rate_dependent for e in self.epochs)
 
     def describe(self) -> list[str]:
-        lines = []
-        for i, e in enumerate(self.epochs, start=1):
-            parts = []
-            for b in e.blocks:
-                lim = f", mag_lim {b.mag_lim:g}" if b.mag_lim > 0 else ""
-                vals = b.params if b.function != "lookup" else f"{len(b.lookup_mag)} bins"
-                parts.append(
-                    f"rates {b.rate_min:g}-{b.rate_max:g}\"/hr {b.function} {vals}{lim}"
-                )
-            filt = f" filter {e.filter}" if e.filter else ""
-            lines.append(
-                f"epoch {i}: {e.source}{filt}: " + "; ".join(parts)
-                + f"; track_frac {tuple(e.track)}"
+        return _describe_epochs(self.epochs)
+
+
+def at_least(probs, required: int) -> np.ndarray:
+    """P(at least ``required`` successes) of independent trials with success ``probs``.
+
+    ``probs`` is a sequence of equal-shape arrays (Poisson binomial).
+    """
+    probs = [np.asarray(p, dtype=float) for p in probs]
+    if required <= 0:
+        return np.ones(np.broadcast(*probs).shape if probs else ())
+    if len(probs) < required:
+        return np.zeros(np.broadcast(*probs).shape if probs else ())
+    # state[k] = P(k successes so far), k = 0 .. required (the last one is ">= required")
+    state = [np.ones(probs[0].shape)] + [np.zeros(probs[0].shape) for _ in range(required)]
+    for p in probs:
+        q = 1.0 - p
+        state[required] = state[required] + state[required - 1] * p
+        for k in range(required - 1, 0, -1):
+            state[k] = state[k] * q + state[k - 1] * p
+        state[0] = state[0] * q
+    return state[required]
+
+
+@dataclass
+class KofNSelection:
+    """Detection needs success at ``required`` of ``epochs`` (the epochs the object is in).
+
+    For a survey that finds an object at K of its N epochs (DEEP: 4 of 29
+    nights), the selection depends on which epochs the orbit falls in:
+    S(m) = P(at least K of those succeed) with p_e = fill_e eta_e tc_e (a
+    Poisson binomial). ``fill`` is 1 when the fill factor was already drawn
+    by the geometry (planted objects), or the pointings' fill factors for a
+    real detection. Tracking x characterisation is the mean over the epochs
+    (exact when they are equal, as for DEEP), applied once to the catalogue
+    magnitude.
+    """
+
+    epochs: list
+    required: int
+    fill: tuple | None = None
+
+    def _fill(self):
+        return self.fill if self.fill is not None else (1.0,) * len(self.epochs)
+
+    def __call__(self, m, rate_asphr) -> np.ndarray:
+        return at_least([f * e(m, rate_asphr) for f, e in zip(self._fill(), self.epochs)],
+                        self.required)
+
+    def eta(self, m, rate_asphr) -> np.ndarray:
+        return at_least([f * e.eta(m, rate_asphr) for f, e in zip(self._fill(), self.epochs)],
+                        self.required)
+
+    def track_char(self, m, rate_asphr) -> np.ndarray:
+        out = np.zeros(np.shape(m))
+        for epoch in self.epochs:
+            out = out + epoch.track_char(m, rate_asphr)
+        return out / max(len(self.epochs), 1)
+
+    @property
+    def measurement(self) -> MeasurementModel:
+        return self.epochs[0].measurement
+
+    def measured_selection(self, m_t, rate_asphr: float, sigma_floor: float = 0.0
+                           ) -> np.ndarray:
+        """S_bar(m_t) = P(at least K of eta_e(m_t)) E[tc(m_hat) | m_t]."""
+        m_t = np.asarray(m_t, dtype=float)
+        meas = self.measurement
+        if meas.is_zero:
+            return self(m_t, rate_asphr)
+        sigma = np.maximum(meas.sigma(m_t), sigma_floor)
+        centre = m_t + meas.offset(m_t)
+        m_hat = centre[:, None] + sigma[:, None] * meas.nodes[None, :]
+        expected = self.track_char(m_hat, rate_asphr) @ meas.weights
+        return self.eta(m_t, rate_asphr) * expected
+
+    cumulative_track_char = SurveySelection.cumulative_track_char
+
+    @property
+    def rate_dependent(self) -> bool:
+        return any(e.rate_dependent for e in self.epochs)
+
+    def describe(self) -> list[str]:
+        return [f"at least {self.required} of {len(self.epochs)} epochs"] + \
+            _describe_epochs(self.epochs)
+
+
+def _describe_epochs(epochs) -> list[str]:
+    lines = []
+    for i, e in enumerate(epochs, start=1):
+        parts = []
+        for b in e.blocks:
+            lim = f", mag_lim {b.mag_lim:g}" if b.mag_lim > 0 else ""
+            vals = b.params if b.function != "lookup" else f"{len(b.lookup_mag)} bins"
+            parts.append(
+                f"rates {b.rate_min:g}-{b.rate_max:g}\"/hr {b.function} {vals}{lim}"
             )
-        return lines
+        filt = f" filter {e.filter}" if e.filter else ""
+        lines.append(
+            f"epoch {i}: {e.source}{filt}: " + "; ".join(parts)
+            + f"; track_frac {tuple(e.track)}"
+        )
+    return lines

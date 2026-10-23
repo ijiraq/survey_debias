@@ -167,6 +167,33 @@ def attributed_to(rows: list[dict], block: Block) -> bool:
     return found >= block.detections_required
 
 
+def field_epochs(rows: list[dict], block: Block) -> tuple[int, dict | None]:
+    """(bit mask of the epochs that found the object in ``block``, first such row).
+
+    ``rows`` are per-epoch Detos1 results (``GridBiasSimulator`` with
+    ``root_mode=False``): bit e is set when epoch e reports flag >= 4 in this
+    block. The row carries m_int and the rate at that epoch.
+    """
+    keys = block.detos_keys()
+    legacy = block.detos_name.strip()
+    mask, first = 0, None
+    for i, r in enumerate(rows):
+        if int(r["flag"]) < 4:
+            continue
+        name = _survey_name(r)
+        expected = keys[i] if "/" in name and i < len(keys) else legacy
+        if name == expected:
+            mask |= 1 << i
+            if first is None:
+                first = r
+    return mask, first
+
+
+def mask_epochs(mask: int) -> list[int]:
+    """0-based epoch indices of a field_epochs bit mask."""
+    return [e for e in range(int(mask).bit_length()) if (int(mask) >> e) & 1]
+
+
 def _jd_utc(jd: float) -> str:
     mjd = jd - 2400000.5
     return (datetime(1858, 11, 17) + timedelta(days=mjd)).strftime("%Y-%m-%d %H:%M")

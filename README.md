@@ -288,6 +288,18 @@ weight. Each plant is one uniform aim in its box: a position the orbit
 cannot reach is an aimed plant of weight zero, not a redraw, since the
 weight is for the whole box.
 
+The magnitude selection of such a survey depends on which epochs an object
+was in: S(m) = P(at least K of those epochs succeed), a Poisson binomial
+over p_e(m) = fill_e η_e(m) tc_e(m) (`efficiency.KofNSelection`), not the
+product over every epoch. `survey_debias_eff` plants K-of-N surveys with one
+Detos1 call per epoch directory (about 30 times slower) and keeps each
+plant's epochs as a bit mask (`epochs` in `plants_<tag>.npz`; older tables
+must be planted again). In the joint fit a CSV survey gives each detection's
+epochs in an `epochs` column (1-based epoch numbers separated by `;`), and an
+optional `eps_cut = { ifree_max = 4.0 }` makes the fit check that its eps
+table used the cut its `select` sample matches. `survey_debias_hfit` still
+needs every epoch required.
+
 OSSSSim's `detos1` reports which block detected an object as the key
 `{directory}/{block}`, where `{directory}` is the survey directory (or
 `epoch{i}` when an epoch directory is loaded on its own); each part may be

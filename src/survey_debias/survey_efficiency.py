@@ -221,16 +221,19 @@ class PlantTable:
     rate: np.ndarray         # on-sky rate ["/hr] (NaN when not in the field)
     ifree: np.ndarray | None = None   # Huang et al. I_free of the aimed orbit
     aim: str = "ecliptic"    # "ecliptic": model i kept; "ifree": model I_free kept
+    epochs: np.ndarray | None = None  # K-of-N blocks: bit mask of the epochs in the field (-1: n/a)
 
     def __post_init__(self):
         if self.ifree is None:
             self.ifree = np.full(len(self.w), np.nan)
+        if self.epochs is None:
+            self.epochs = np.full(len(self.w), -1, dtype=np.int64)
 
     def __len__(self) -> int:
         return int(self.w.size)
 
     def save(self, path) -> None:
-        arrays = {k: getattr(self, k) for k in PLANT_FIELDS + ("ifree",)}
+        arrays = {k: getattr(self, k) for k in PLANT_FIELDS + OPTIONAL_FIELDS}
         for k in ("block", "comp"):
             arrays[k] = np.asarray(arrays[k], dtype=str)
         np.savez_compressed(path, survey=self.survey, aim=self.aim, **arrays)
@@ -239,7 +242,7 @@ class PlantTable:
     def load(cls, path) -> "PlantTable":
         z = np.load(path, allow_pickle=False)
         return cls(survey=str(z["survey"]), **{k: z[k] for k in PLANT_FIELDS},
-                   ifree=z["ifree"] if "ifree" in z.files else None,
+                   **{k: z[k] if k in z.files else None for k in OPTIONAL_FIELDS},
                    aim=str(z["aim"]) if "aim" in z.files else "ecliptic")
 
     @classmethod
@@ -247,12 +250,58 @@ class PlantTable:
         tables = list(tables)
         return cls(survey=tables[0].survey,
                    **{k: np.concatenate([getattr(t, k) for t in tables])
-                      for k in PLANT_FIELDS + ("ifree",)}, aim=tables[0].aim)
+                      for k in PLANT_FIELDS + OPTIONAL_FIELDS}, aim=tables[0].aim)
 
     def for_block(self, name: str) -> "PlantTable":
         m = self.block == name
-        return PlantTable(self.survey, **{k: getattr(self, k)[m] for k in PLANT_FIELDS + ("ifree",)},
+        return PlantTable(self.survey, **{k: getattr(self, k)[m]
+                                          for k in PLANT_FIELDS + OPTIONAL_FIELDS},
                           aim=self.aim)
+
+    def check_epochs(self, blocks: dict) -> None:
+        """K-of-N blocks need the per-epoch field record (plant tables from before it lack it)."""
+        for name, block in blocks.items():
+            here = (self.block == name) & self.in_field
+            if block.k_of_n and here.any() and np.any(self.epochs[here] < 0):
+                raise ValueError(f"{self.survey}/{name}: plant table has no per-epoch field "
+                                 "record, which a K-of-N survey needs; plant again "
+                                 "(without --reuse)")
+
+
+OPTIONAL_FIELDS = ("ifree", "epochs")
+
+
+class _SelectionCache:
+    """A block's selection, or for a K-of-N block the one for a plant's epoch mask."""
+
+    def __init__(self, with_fill: bool = False):
+        self.with_fill = with_fill
+        self._cache = {}
+
+    def __call__(self, block: Block, mask: int):
+        if not block.k_of_n:
+            return block.selection
+        from .grid_bias_run import mask_epochs
+
+        key = (id(block), int(mask))
+        if key not in self._cache:
+            self._cache[key] = block.kofn_selection(mask_epochs(mask), self.with_fill)
+        return self._cache[key]
+
+
+def record_field(rows: list[dict], block: Block) -> tuple[bool, int, dict | None]:
+    """(in the field, epoch mask, row with m_int and rate) of one plant's Detos1 rows.
+
+    A K-of-N block needs per-epoch rows (root_mode=False): the plant is in the
+    field when at least ``detections_required`` epochs found it.
+    """
+    from .grid_bias_run import attributed_to, field_epochs
+
+    if block.k_of_n:
+        mask, row = field_epochs(rows, block)
+        return bin(mask).count("1") >= block.detections_required, mask, row
+    found = attributed_to(rows, block)
+    return found, -1, rows[0] if found else None
 
 
 def _row_rate(row) -> float:
@@ -262,7 +311,7 @@ def _row_rate(row) -> float:
 def plant_block(sim, block: Block, model: ModelPopulation, n_plants: int, seed: int,
                 progress: int = 0) -> PlantTable:
     """``n_plants`` aimed model plants through one block of the unit-efficiency copy."""
-    from .grid_bias_run import _TileSampler, attributed_to
+    from .grid_bias_run import _TileSampler
 
     rng = np.random.default_rng(seed)
     sampler = _TileSampler(block)
@@ -270,6 +319,7 @@ def plant_block(sim, block: Block, model: ModelPopulation, n_plants: int, seed: 
            for k in ("a", "e", "i", "r", "node", "peri", "M", "epoch", "w", "mu", "rate")}
     comp = np.empty(n_plants, dtype=object)
     in_field = np.zeros(n_plants, dtype=bool)
+    epochs = np.full(n_plants, -1, dtype=np.int64)
     H = 5.0
     for j in range(n_plants):
         k = int(rng.integers(len(model)))
@@ -289,16 +339,15 @@ def plant_block(sim, block: Block, model: ModelPopulation, n_plants: int, seed: 
         if w <= 0.0:
             continue
         rows = sim.epoch_rows(a, e, inc_el, node, peri, M, H, epoch_jd=tile.jd)
-        if attributed_to(rows, block):
-            in_field[j] = True
-            row = rows[0]
+        in_field[j], epochs[j], row = record_field(rows, block)
+        if in_field[j]:
             out["mu"][j] = float(row["m_int"].value) - H
             out["rate"][j] = _row_rate(row)
         if progress and (j + 1) % progress == 0:
             print(f"    {block.survey}/{block.name}: {j + 1}/{n_plants} plants, "
                   f"{int(in_field[: j + 1].sum())} in the field", flush=True)
     return PlantTable(block.survey, np.full(n_plants, block.name, dtype=object), comp,
-                      in_field=in_field, **out)
+                      in_field=in_field, epochs=epochs, **out)
 
 
 def poles_at_angle(rhat: np.ndarray, centre: np.ndarray, angle_deg: float) -> list:
@@ -361,7 +410,7 @@ def plant_block_free(sim, block: Block, model: ModelPopulation, n_plants: int, s
     forced plane. The plant's own I_free (from its aimed elements, which
     shifts its forcing pole slightly) is stored for the sample cut.
     """
-    from .grid_bias_run import _TileSampler, attributed_to
+    from .grid_bias_run import _TileSampler
     from .ifree import free_inclination
 
     rng = np.random.default_rng(seed)
@@ -372,6 +421,7 @@ def plant_block_free(sim, block: Block, model: ModelPopulation, n_plants: int, s
            for k in ("a", "e", "i", "r", "node", "peri", "M", "epoch", "w", "mu", "rate", "ifree")}
     comp = np.empty(n_plants, dtype=object)
     in_field = np.zeros(n_plants, dtype=bool)
+    epochs = np.full(n_plants, -1, dtype=np.int64)
     H = 5.0
     for j in range(n_plants):
         k = int(rng.integers(len(model)))
@@ -401,16 +451,15 @@ def plant_block_free(sim, block: Block, model: ModelPopulation, n_plants: int, s
         if w <= 0.0:
             continue
         rows = sim.epoch_rows(a, e, inc, node, peri, M, H, epoch_jd=tile.jd)
-        if attributed_to(rows, block):
-            in_field[j] = True
-            row = rows[0]
+        in_field[j], epochs[j], row = record_field(rows, block)
+        if in_field[j]:
             out["mu"][j] = float(row["m_int"].value) - H
             out["rate"][j] = _row_rate(row)
         if progress and (j + 1) % progress == 0:
             print(f"    {block.survey}/{block.name}: {j + 1}/{n_plants} plants, "
                   f"{int(in_field[: j + 1].sum())} in the field", flush=True)
     return PlantTable(block.survey, np.full(n_plants, block.name, dtype=object), comp,
-                      in_field=in_field, aim="ifree", **out)
+                      in_field=in_field, aim="ifree", epochs=epochs, **out)
 
 
 @dataclass
@@ -516,6 +565,8 @@ def survey_efficiency(plants: PlantTable, blocks: dict, cut: SampleCut | None = 
     h = np.arange(h_grid[0], h_grid[1] + 0.5 * h_grid[2], h_grid[2])
     rng = np.random.default_rng(seed)
     keep = plants.in_field & cut.mask(plants)
+    plants.check_epochs(blocks)
+    selection_for = _SelectionCache()
     eps = np.zeros(len(h))
     boot = np.zeros((n_boot, len(h)))
     filters = set()
@@ -524,24 +575,26 @@ def survey_efficiency(plants: PlantTable, blocks: dict, cut: SampleCut | None = 
         n_b = int(here.sum())
         if n_b == 0:
             raise ValueError(f"{plants.survey}/{name}: no plants")
-        sel = block.selection
         filters.add(block.filter)
         use = here & keep
         if not use.any():
             continue
         mu, rate, w = plants.mu[use], plants.rate[use], plants.w[use]
+        masks = plants.epochs[use]
         m_grid = np.arange(math.floor(h[0] + mu.min()) - 1.0,
                            math.ceil(h[-1] + mu.max()) + 1.0, 0.005)
         s = np.empty((int(use.sum()), len(h)))
-        if sel.rate_dependent:
-            keys = np.round(rate, 2)
-            for key in np.unique(keys):
-                rows = keys == key
+        # One table per (epoch mask, rate) group: the mask matters for K-of-N
+        # blocks only, the rate for rate-dependent efficiencies only.
+        rate_dependent = block.selection.rate_dependent
+        keys = np.round(rate, 2) if rate_dependent else np.full(rate.size, np.median(rate))
+        groups = masks if block.k_of_n else np.full(masks.size, -1)
+        for mask in np.unique(groups):
+            sel = selection_for(block, mask)
+            for key in np.unique(keys[groups == mask]):
+                rows = (groups == mask) & (keys == key)
                 table = sel.measured_selection(m_grid, float(key))
                 s[rows] = np.interp(h[None, :] + mu[rows, None], m_grid, table)
-        else:
-            table = sel.measured_selection(m_grid, float(np.median(rate)))
-            s[:] = np.interp(h[None, :] + mu[:, None], m_grid, table)
         eps += (w @ s) / n_b
         if n_boot:
             pw = rng.poisson(1.0, size=(n_boot, len(w))) * w[None, :]
@@ -584,7 +637,10 @@ def geometry_pass(char_root, survey: str, model: ModelPopulation, n_plants: int,
     try:
         unit_root = make_unit_characterization(char_root, survey, work)
         blocks = load_survey_blocks(unit_root, survey, use_ossssim=True)
-        sim = GridBiasSimulator(survey, blocks, PhotSpec(), "r", seed=seed)
+        # A K-of-N survey needs to know which epochs found each plant.
+        per_epoch = any(b.k_of_n for b in blocks.values())
+        sim = GridBiasSimulator(survey, blocks, PhotSpec(), "r", seed=seed,
+                                root_mode=False if per_epoch else None)
         tables = []
         for name, block in blocks.items():
             block_seed = seed + zlib.crc32(f"{survey}/{name}".encode()) % 100000
@@ -647,6 +703,11 @@ class OverlapTable:
     block_b: np.ndarray
     mu_b: np.ndarray
     rate_b: np.ndarray
+    epochs_b: np.ndarray | None = None   # K-of-N B: bit mask of B's epochs in the field
+
+    def __post_init__(self):
+        if self.epochs_b is None:
+            self.epochs_b = np.full(self.index.size, -1, dtype=np.int64)
 
 
 def run_through(plants: PlantTable, char_root, survey_b: str, seed: int = 42,
@@ -654,7 +715,7 @@ def run_through(plants: PlantTable, char_root, survey_b: str, seed: int = 42,
     """Run A's in-field plants (stored elements) through B's unit-efficiency copy."""
     from ossssim.color import PhotSpec
 
-    from .grid_bias_run import GridBiasSimulator, attributed_to
+    from .grid_bias_run import GridBiasSimulator
 
     index = np.flatnonzero(plants.in_field)
     out = OverlapTable(plants.survey, survey_b, index, np.zeros(index.size, dtype=bool),
@@ -667,17 +728,21 @@ def run_through(plants: PlantTable, char_root, survey_b: str, seed: int = 42,
     try:
         unit_root = make_unit_characterization(char_root, survey_b, work)
         blocks = load_survey_blocks(unit_root, survey_b, use_ossssim=True)
-        sim = GridBiasSimulator(survey_b, blocks, PhotSpec(), "r", seed=seed)
+        per_epoch = any(b.k_of_n for b in blocks.values())
+        sim = GridBiasSimulator(survey_b, blocks, PhotSpec(), "r", seed=seed,
+                                root_mode=False if per_epoch else None)
         H = 5.0
         for n, j in enumerate(index):
             rows = sim.epoch_rows(plants.a[j], plants.e[j], plants.i[j], plants.node[j],
                                   plants.peri[j], plants.M[j], H, epoch_jd=plants.epoch[j])
             for name, block in blocks.items():
-                if attributed_to(rows, block):
+                found, mask, row = record_field(rows, block)
+                if found:
                     out.in_b[n] = True
                     out.block_b[n] = name
-                    out.mu_b[n] = float(rows[0]["m_int"].value) - H
-                    out.rate_b[n] = _row_rate(rows[0])
+                    out.mu_b[n] = float(row["m_int"].value) - H
+                    out.rate_b[n] = _row_rate(row)
+                    out.epochs_b[n] = mask
                     break
     finally:
         if own:
@@ -701,6 +766,8 @@ def overlap_efficiency(plants: PlantTable, blocks_a: dict, overlap: OverlapTable
     h = np.arange(h_grid[0], h_grid[1] + 0.5 * h_grid[2], h_grid[2])
     rng = np.random.default_rng(seed)
     keep_a = cut.mask(plants)
+    plants.check_epochs(blocks_a)
+    selection_for = _SelectionCache()
     eps = np.zeros(len(h))
     boot = np.zeros((n_boot, len(h)))
     in_b = overlap.in_b & np.isin(overlap.block_b.astype(str), list(blocks_b))
@@ -712,10 +779,10 @@ def overlap_efficiency(plants: PlantTable, blocks_a: dict, overlap: OverlapTable
         if not pick.any():
             continue
         j, k = rows[pick], sub_b[pick]
-        sel_a = block.selection
         s = np.empty((j.size, len(h)))
         for n in range(j.size):
-            sel_b = blocks_b[overlap.block_b[k[n]]].selection
+            sel_a = selection_for(block, plants.epochs[j[n]])
+            sel_b = selection_for(blocks_b[overlap.block_b[k[n]]], overlap.epochs_b[k[n]])
             m_a = h + colour_a + plants.mu[j[n]]
             m_b = h + colour_b + overlap.mu_b[k[n]]
             s[n] = (sel_a.measured_selection(m_a, float(plants.rate[j[n]]))
@@ -1032,9 +1099,13 @@ def main(argv=None) -> int:
         blocks = load_survey_blocks(char_root, survey, use_ossssim=False)
         excluded = [b for b in args.exclude_block if b in blocks]
         blocks = {k: v for k, v in blocks.items() if k not in excluded}
+        if model is None:
+            model = ModelPopulation.from_file(args.model, components)
+        f_cut, _ = model_cut_fraction(model, cut)
         meta = {"model": args.model, "components": ",".join(components),
                 "plants_per_block": args.plants, "seed": args.seed, "aim": plants.aim,
-                "excluded_blocks": ",".join(excluded) or "none"}
+                "excluded_blocks": ",".join(excluded) or "none",
+                "f_cut": f"{f_cut:.5f}"}
         table = survey_efficiency(plants, blocks, cut, n_boot=args.boot, seed=args.seed,
                                   meta=meta)
         out = char_root / survey / f"eps_{args.tag}.csv"

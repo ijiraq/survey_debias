@@ -113,5 +113,30 @@ class Fit(unittest.TestCase):
         self.assertGreaterEqual(fit.loglike, like.loglike([TRUE_ALPHA, 1.0, 0.0, TRUE_HO, 0.0]) - 1e-6)
 
 
+class ParameterBox(unittest.TestCase):
+    def test_mle_and_68_percent_interval(self):
+        from types import SimpleNamespace
+
+        from survey_debias.joint_cli import parameter_box_text
+
+        terms, _ = two_surveys()
+        like = joint.JointLikelihood(terms, sigma_c=0.0, form="tapered")
+        theta = np.array([0.2, 0.5, 8.0, -3.0, 0.0])
+        rng = np.random.default_rng(0)
+        samples = theta + rng.normal(0.0, [0.01, 0.02, 0.1, 0.5, 0.01], size=(4000, 5))
+        fit = SimpleNamespace(theta=theta, profile_alpha=np.array([]),
+                              profile_loglike=np.array([]))
+        text = parameter_box_text(like, fit, samples)
+        for label in (r"$\alpha$", r"$\beta$", "$H_B$", "$H_o$"):
+            self.assertIn(label, text)
+        lo, hi = np.percentile(samples[:, 0], [16, 84])
+        self.assertIn(f"$\\alpha$ = 0.200  [{lo:.3f}, {hi:.3f}]", text)
+        # Exponential form: only alpha and H_o; no samples gives the MLE alone.
+        like.form = "exponential"
+        text = parameter_box_text(like, fit, None)
+        self.assertNotIn(r"$\beta$", text)
+        self.assertIn("$H_o$ = -3.00", text)
+
+
 if __name__ == "__main__":
     unittest.main()
